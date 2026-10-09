@@ -341,6 +341,46 @@ def fetch_and_cache_land_use(
     return geojson_data
 
 
+def fetch_transparent_master_plan(
+    bbox: tuple[float, float, float, float] | None = None,
+    output_path: Path | None = None,
+) -> Path:
+    """
+    Fetch the Master Plan export image, apply a server-side alpha mask to turn 
+    white background pixels transparent, and save locally.
+    """
+    target_path = output_path or (DATA_DIR / "master_plan_transparent.png")
+    if target_path.exists():
+        log.info("Loading cached transparent master plan from %s", target_path)
+        return target_path
+
+    if bbox is not None:
+        min_lon, min_lat, max_lon, max_lat = bbox
+    else:
+        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
+
+    url = f"https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_MasterPlan2031/MapServer/export?bbox={min_lon},{min_lat},{max_lon},{max_lat}&bboxSR=4326&imageSR=4326&size=1400,1400&layers=show:0&format=png32&f=image"
+    
+    session = requests.Session()
+    session.mount("https://", LegacyRenegotiationAdapter())
+    
+    log.info("Fetching Master Plan image for alpha masking...")
+    resp = session.get(url, verify=False, timeout=30)
+    resp.raise_for_status()
+    
+    img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    arr = np.array(img)
+    
+    # Soft alpha mask: keeps tinted fills while removing pure white/light paper background
+    min_rgb = np.min(arr[:, :, :3], axis=2)
+    arr[:, :, 3] = np.clip((255 - min_rgb) * 3.5, 0, 255).astype(np.uint8)
+    
+    transparent_img = Image.fromarray(arr)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    transparent_img.save(target_path, format="PNG")
+    
+    return target_path
+
 def enrich_clusters_with_land_use(
     clusters: list[dict],
     ndvi_data: dict,
@@ -456,7 +496,7 @@ def _crop_visual_image(
     visual_path: Path,
 ) -> bytes:
     """
-    Crop the T1 visual PNG to the cluster bounding box (pixel coords).
+    Crop the T2 (Post-Disturbance) visual PNG to the cluster bounding box (pixel coords).
     Returns JPEG bytes suitable for embedding in a Bedrock message.
     """
     row_min, col_min, row_max, col_max = bbox
@@ -473,15 +513,21 @@ def _crop_visual_image(
         right  = min(img_w, int((col_max + 1) * scale_x))
         bottom = min(img_h, int((row_max + 1) * scale_y))
 
-        # Give a little context margin (20 %)
-        pad_x = max(10, int((right - left) * 0.2))
-        pad_y = max(10, int((bottom - top) * 0.2))
+        # Apply a 6x bounding box padding around the cluster footprint
+        box_w = right - left
+        box_h = bottom - top
+        pad_x = int(box_w * 2.5)
+        pad_y = int(box_h * 2.5)
+        
         left   = max(0, left - pad_x)
         top    = max(0, top - pad_y)
         right  = min(img_w, right + pad_x)
         bottom = min(img_h, bottom + pad_y)
 
         cropped = img.crop((left, top, right, bottom))
+        
+        # Upscale to 512x512 using Lanczos resampling
+        cropped = cropped.resize((512, 512), Image.Resampling.LANCZOS)
 
         # JPEG does not support alpha channels (RGBA) or palette modes (P).
         # Composite onto a white RGB background to preserve visual appearance.
@@ -512,11 +558,12 @@ Official Baseline Context (FMDA Survey):
 - Near Water: {near_water}
 
 Your task:
-1. Visually inspect the image for signs of unauthorized construction or \
-land carving: dirt road grids, boundary wall foundations, soil compaction \
-patterns, plot subdivision markings.
+1. The parcel has a baseline classification of Agriculture Cropland per the FMDA survey. \
+Inspect for active ground clearance, dirt road corridors, and rectangular soil compaction adjacent to settlements. \
+Flag as FLAG_FOR_REVIEW if deliberate anthropogenic clearing or road carving is evident on agricultural land, \
+even if formal concrete foundations are not yet visible.
 2. Consider the previous agricultural/vegetative baseline when evaluating \
-disturbance legitimacy. Clearings on designated agricultural cropland or \
+disturbance legitimacy. Baseline land use is an administrative survey, not statutory master plan zoning. Do not make definitive legal conclusions. Focus on visible physical ground alterations: soil excavation, vegetation loss, and nascent road corridors. Clearings on designated agricultural cropland or \
 within waterbody buffer zones (<100m) represent severe regulatory violations.
 3. Distinguish these from natural causes (seasonal dry-out, harvested \
 fields) or sensor artefacts.
@@ -525,7 +572,7 @@ exact schema:
 {{
   "parcel_id": "{parcel_id}",
   "confidence": <float 0–1>,
-  "violation_type": "<e.g. Unauthorized Plot Carving | Boundary Wall Construction | Agricultural Burn | Natural Drying | Sensor Artifact>",
+  "violation_type": "<e.g. Suspected Land Clearing (Unverified) | Agricultural Burn | Natural Drying | Sensor Artifact>",
   "action": "<FLAG_FOR_REVIEW | SUPPRESS_NO_ACTION>",
   "reasoning": "<two or three sentences>"
 }}
@@ -542,7 +589,7 @@ def call_bedrock_verification(
     region: str | None = None,
 ) -> InterdictionReport:
     """
-    Crop the T1 visual around *cluster*, send to Claude via Bedrock converse,
+    Crop the T2 (Post-Disturbance) visual around *cluster*, send to Claude via Bedrock converse,
     validate the response against InterdictionReport schema, and return it.
 
     Only call for CANDIDATE clusters.
@@ -589,7 +636,7 @@ def call_bedrock_verification(
                 ],
             }
         ],
-        inferenceConfig={"maxTokens": 512, "temperature": 0.0},
+        inferenceConfig={"temperature": 0.0, "maxTokens": 600},
     )
 
     raw_text: str = (

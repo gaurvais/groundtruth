@@ -11,11 +11,13 @@ import traceback
 
 import folium
 import numpy as np
+import requests
 import streamlit as st
 from PIL import Image
 from streamlit_folium import st_folium
 
 import pipeline as pl
+from pipeline import LegacyRenegotiationAdapter
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -26,6 +28,47 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+def get_legacy_session():
+    session = requests.Session()
+    adapter = LegacyRenegotiationAdapter()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+FALLBACK_LAND_USE = []
+FALLBACK_MASTER_PLAN = []
+
+@st.cache_data(ttl=86400)
+def fetch_official_legend(service_name):
+    url = f"https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/{service_name}/MapServer/legend?f=json"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    session = get_legacy_session()
+    try:
+        res = session.get(url, timeout=20, verify=False, headers=headers)
+        data = res.json()
+        items = []
+        for layer in data.get("layers", []):
+            if service_name == "FMDA_Land_Use" and layer.get("layerId") != 1:
+                continue
+            for leg in layer.get("legend", []):
+                label = leg.get("label", "").strip()
+                img_b64 = leg.get("imageData", "")
+                if label and img_b64:
+                    items.append({
+                        "label": label,
+                        "image": f"data:image/png;base64,{img_b64}"
+                    })
+        if items:
+            return items
+    except Exception as e:
+        print(f"FMDA Legend fetch error for {service_name}: {e}")
+
+    # Fallback remains active if the server drops connection entirely
+    return FALLBACK_LAND_USE if service_name == "FMDA_Land_Use" else FALLBACK_MASTER_PLAN
 
 # ---------------------------------------------------------------------------
 # Custom CSS — tight, professional look
@@ -231,6 +274,18 @@ else:
 # ---------------------------------------------------------------------------
 # Government Action Queue (Ranked Priority & FMDA Baseline Land Use)
 # ---------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("## 🌍 Environmental Impact Summary")
+
+total_footprint_ha = sum(c["pixel_count"] for c in clusters) * 0.01
+at_risk_ha = sum(c["pixel_count"] for c in clusters if any(k in c.get("dominant_class", "").lower() for k in ["agri", "forest", "crop"])) * 0.01
+water_prox_count = sum(1 for c in clusters if c.get("near_water"))
+
+i1, i2, i3 = st.columns(3)
+i1.metric("Total Footprint Monitored", f"{total_footprint_ha:.2f} ha")
+i2.metric("Agricultural / Forest Land At Risk", f"{at_risk_ha:.2f} ha")
+i3.metric("Critical Waterbody Proximity", f"{water_prox_count} Clusters")
+
 candidates = [c for c in clusters if c["status"] == "CANDIDATE"]
 
 if candidates:
@@ -451,7 +506,7 @@ if candidates:
         crop = st.session_state.get("crop_bytes")
         if crop:
             with st.expander("🖼️ View image region sent to Claude"):
-                st.image(crop, caption="Cropped T1 region dispatched to Bedrock")
+                st.image(crop, caption="Cropped T2 (Post-Disturbance / May 2025) dispatched to Bedrock")
 
         # Optional S3 upload button
         if crop:
@@ -469,11 +524,7 @@ if candidates:
         # ── TASK 5-5: Folium satellite map + Master Plan 2031 ──────────────
         st.markdown("### 📍 Disturbance Location — Satellite & Master Plan View")
 
-        show_master_plan = st.checkbox(
-            "🗺️ Overlay Live FMDA Master Plan 2031 (Zoning & Land Use)",
-            value=True,
-            help="Overlays the official FMDA Master Plan 2031 MapServer layer as a semi-transparent WMS layer (opacity: 0.55).",
-        )
+        st.info("Use the Layer Control icon 🎛️ in the top right of the map to toggle official FMDA cartography overlays.")
 
         lat = selected_cluster["lat"]
         lon = selected_cluster["lon"]
@@ -489,23 +540,46 @@ if candidates:
         fmap = folium.Map(
             location=[lat, lon],
             zoom_start=16,
-            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/"
-                  "World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Esri World Imagery",
+            tiles=None,
         )
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri World Imagery",
+            name="🛰️ Satellite Basemap (Esri)",
+        ).add_to(fmap)
 
-        # Live FMDA Master Plan 2031 overlay
-        if show_master_plan:
-            folium.raster_layers.WmsTileLayer(
-                url="https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_MasterPlan2031/MapServer/export",
-                layers="show:0",
-                name="FMDA Master Plan 2031",
-                fmt="image/png",
-                transparent=True,
-                opacity=0.55,
-                overlay=True,
-                control=True,
-            ).add_to(fmap)
+        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
+
+        # 1. FMDA Master Plan 2031 Overlay (Server-side alpha masked)
+        mp_path = pl.fetch_transparent_master_plan(bbox=(min_lon, min_lat, max_lon, max_lat))
+        import base64
+        with open(mp_path, "rb") as image_file:
+            mp_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+        mp_data_uri = f"data:image/png;base64,{mp_b64}"
+
+        folium.raster_layers.ImageOverlay(
+            image=mp_data_uri,
+            bounds=[[min_lat, min_lon], [max_lat, max_lon]],
+            opacity=0.75,
+            transparent=True,
+            name="🏛️ FMDA Master Plan 2031 (Statutory Zoning)",
+            overlay=True,
+            control=True,
+            show=False,
+        ).add_to(fmap)
+
+        # 2. FMDA Land Use Overlay (Official Patterns)
+        lu_export_url = f"https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_Land_Use/MapServer/export?bbox={min_lon},{min_lat},{max_lon},{max_lat}&bboxSR=4326&imageSR=4326&size=1400,1400&layers=show:1&format=png32&transparent=true&f=image"
+        folium.raster_layers.ImageOverlay(
+            image=lu_export_url,
+            bounds=[[min_lat, min_lon], [max_lat, max_lon]],
+            opacity=1.0,
+            transparent=True,
+            name="🌱 FMDA Baseline Land Use (Cadastral Survey)",
+            overlay=True,
+            control=True,
+            show=False,
+        ).add_to(fmap)
 
         folium.Marker(
             location=[lat, lon],
@@ -534,9 +608,44 @@ if candidates:
             tooltip=f"Approx. disturbed area (~{radius_m} m radius)",
         ).add_to(fmap)
 
-        folium.LayerControl(position="topright").add_to(fmap)
+        folium.LayerControl(position="topright", collapsed=True).add_to(fmap)
 
         st_folium(fmap, width="100%", height=480, returned_objects=[])
+
+        with st.expander("🏛️ Official FMDA Statutory Legend (Direct from State GIS Server)", expanded=False):
+            tab1, tab2 = st.tabs(["🌱 Land Use Cadastral Survey", "📐 Master Plan 2031 Zoning"])
+
+            with tab1:
+                lu_items = fetch_official_legend("FMDA_Land_Use")
+                if lu_items:
+                    cols = st.columns(3)
+                    for idx, item in enumerate(lu_items):
+                        with cols[idx % 3]:
+                            st.markdown(
+                                f'<div style="display:flex; align-items:center; margin-bottom:8px;">'
+                                f'<img src="{item["image"]}" style="margin-right:10px; border:1px solid #ccc; width:20px; height:20px;" />'
+                                f'<span style="font-size:12px;">{item["label"]}</span>'
+                                f'</div>', 
+                                unsafe_allow_html=True
+                            )
+                else:
+                    st.caption("Official FMDA Land Use legend service unavailable.")
+
+            with tab2:
+                mp_items = fetch_official_legend("FMDA_MasterPlan2031")
+                if mp_items:
+                    cols = st.columns(3)
+                    for idx, item in enumerate(mp_items):
+                        with cols[idx % 3]:
+                            st.markdown(
+                                f'<div style="display:flex; align-items:center; margin-bottom:8px;">'
+                                f'<img src="{item["image"]}" style="margin-right:10px; border:1px solid #ccc; width:20px; height:20px;" />'
+                                f'<span style="font-size:12px;">{item["label"]}</span>'
+                                f'</div>', 
+                                unsafe_allow_html=True
+                            )
+                else:
+                    st.caption("Official FMDA Master Plan legend service unavailable.")
 
 else:
     st.markdown("---")

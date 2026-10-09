@@ -111,6 +111,15 @@ GroundTruth/
 
 ---
 
+## 🚀 Recent Updates
+
+- **NumPy Soft-Alpha Master Plan Overlay:** Applied a dynamic server-side Python (NumPy) alpha mask to instantly remove the solid white background on the FMDA ArcGIS Master Plan exports while preserving the tinted statutory grid overlay, seamlessly integrating with Folium.
+- **Live FMDA REST Legend Integration:** Fetches canonical cartographic symbology rules directly from the state GIS MapServer `/legend?f=json` endpoints. Utilizes a custom `LegacyRenegotiationAdapter` (on `requests.Session`) to bypass outdated OpenSSL protocol errors when connecting to the government server.
+- **Deterministic AI Verification:** Calibrated the AWS Bedrock/Claude prompt to focus strictly on physical ground alterations rather than making definitive legal judgments. Set inference configuration to `temperature: 0.0, maxTokens: 600` for highly deterministic, repeatable outputs.
+- **Environmental Impact Panel:** Included a high-level Streamlit metric dashboard that aggregates pixel cluster counts, converting footprints to hectares and flagging intersection violations with protected agricultural land and 100m waterbody buffers.
+
+---
+
 ## 📄 Output Schema: Interdiction Report
 
 When coordinates are dispatched to AWS Bedrock, Claude returns structured JSON validated against the `InterdictionReport` Pydantic model:
