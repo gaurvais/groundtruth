@@ -59,13 +59,23 @@ st.markdown(
 
     /* Alert card */
     .alert-card {
-        border: 1px solid #dee2e6;
+        border: 1px solid #ced4da;
         border-radius: 10px;
-        padding: 1.2rem 1.5rem;
-        background: #f8f9fa;
+        padding: 1.25rem 1.5rem;
+        background: #ffffff;
+        color: #1f2937 !important;
         margin-top: 1rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
     }
-    .alert-card h3 { margin-top: 0; }
+    .alert-card h3 { 
+        margin-top: 0; 
+        color: #111827 !important; 
+        font-weight: 700;
+        font-size: 1.25rem;
+    }
+    .alert-card td {
+        color: #1f2937 !important;
+    }
     .alert-high { border-left: 6px solid #dc3545; }
     .alert-low  { border-left: 6px solid #198754; }
 
@@ -347,26 +357,30 @@ if candidates:
         )
         conf_pct = f"{report.confidence * 100:.0f}%"
 
+        badge_color = "#b91c1c" if is_flag else "#15803d"
+        badge_bg = "#fee2e2" if is_flag else "#dcfce7"
+
         st.markdown(
             f"""
             <div class="alert-card {card_cls}">
-                <h3>Interdiction Report — {report.parcel_id}</h3>
-                <table style="width:100%; border-collapse:collapse;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; border-bottom:1px solid #e5e7eb; padding-bottom:0.75rem;">
+                    <h3 style="margin:0; color:#111827 !important; font-size:1.3rem; font-weight:700;">Interdiction Report — {report.parcel_id}</h3>
+                    <span style="background:{badge_bg}; color:{badge_color} !important; font-weight:700; font-size:0.9rem; padding:4px 12px; border-radius:999px; border:1px solid {badge_color}40;">
+                        {action_badge}
+                    </span>
+                </div>
+                <table style="width:100%; border-collapse:collapse; color:#1f2937 !important;">
                 <tr>
-                    <td style="padding:4px 12px 4px 0; color:#6c757d; font-size:.85rem;">Action</td>
-                    <td style="font-weight:700; font-size:1.05rem;">{action_badge}</td>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; width:140px;">Violation Type</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{report.violation_type}</td>
                 </tr>
                 <tr>
-                    <td style="padding:4px 12px 4px 0; color:#6c757d; font-size:.85rem;">Violation Type</td>
-                    <td>{report.violation_type}</td>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">AI Confidence</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{conf_pct}</td>
                 </tr>
                 <tr>
-                    <td style="padding:4px 12px 4px 0; color:#6c757d; font-size:.85rem;">AI Confidence</td>
-                    <td>{conf_pct}</td>
-                </tr>
-                <tr>
-                    <td style="padding:4px 12px 4px 0; color:#6c757d; font-size:.85rem; vertical-align:top;">Reasoning</td>
-                    <td style="font-style:italic;">{report.reasoning}</td>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; vertical-align:top;">Reasoning</td>
+                    <td style="color:#1f2937 !important; font-size:0.95rem; line-height:1.55; font-style:italic;">{report.reasoning}</td>
                 </tr>
                 </table>
             </div>
