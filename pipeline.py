@@ -1,3 +1,4 @@
+
 """
 pipeline.py — GroundTruth Detection Pipeline
 ============================================
@@ -28,6 +29,10 @@ from rasterio.transform import xy as rio_xy
 from PIL import Image
 from pydantic import BaseModel, field_validator
 from scipy import ndimage
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Constants — tune these without touching logic
@@ -36,7 +41,7 @@ NDVI_THRESHOLD: float = 0.15          # Minimum delta-NDVI to flag a pixel
 FILL_RATIO_ARTIFACT_THRESHOLD: float = 0.58  # Rectangles this full → artifact
 MIN_CLUSTER_PIXELS: int = 50          # Ignore tiny specks < N pixels
 S3_BUCKET: str = os.getenv("GROUNDTRUTH_S3_BUCKET", "groundtruth-enforcement")
-AWS_REGION: str = os.getenv("AWS_DEFAULT_REGION", "ap-southeast-2")
+AWS_REGION: str = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-southeast-2"
 
 # Default model ID / inference profile ID for Claude Sonnet 4.6 in ap-southeast-2
 BEDROCK_MODEL_ID: str = os.getenv(
