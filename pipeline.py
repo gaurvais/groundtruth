@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+import ssl
 from pathlib import Path
 from typing import Literal
 
@@ -26,13 +27,34 @@ import boto3
 import numpy as np
 import rasterio
 from rasterio.transform import xy as rio_xy
+import requests
+import urllib3
+from requests.adapters import HTTPAdapter
+from shapely.geometry import shape, Point, box
 from PIL import Image
 from pydantic import BaseModel, field_validator
 from scipy import ndimage
 from dotenv import load_dotenv
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # Load environment variables from .env if present
 load_dotenv()
+
+
+class LegacyRenegotiationAdapter(HTTPAdapter):
+    """
+    HTTPAdapter to handle OpenSSL 3.0+ legacy renegotiation restrictions
+    frequently encountered on state government GIS endpoints (GMDA/FMDA).
+    """
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
 
 # ---------------------------------------------------------------------------
 # Constants — tune these without touching logic
@@ -42,6 +64,13 @@ FILL_RATIO_ARTIFACT_THRESHOLD: float = 0.58  # Rectangles this full → artifact
 MIN_CLUSTER_PIXELS: int = 50          # Ignore tiny specks < N pixels
 S3_BUCKET: str = os.getenv("GROUNDTRUTH_S3_BUCKET", "groundtruth-enforcement")
 AWS_REGION: str = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-southeast-2"
+
+FMDA_LAND_USE_QUERY_URL: str = (
+    "https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_Land_Use/MapServer/1/query"
+)
+FMDA_MASTER_PLAN_EXPORT_URL: str = (
+    "https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_MasterPlan2031/MapServer/export"
+)
 
 # Default model ID / inference profile ID for Claude Sonnet 4.6 in ap-southeast-2
 BEDROCK_MODEL_ID: str = os.getenv(
@@ -253,6 +282,157 @@ def extract_clusters(ndvi_data: dict) -> list[dict]:
 
 
 # ===========================================================================
+# Baseline Land-Use Ingestion & Spatial Enrichment (FMDA GIS)
+# ===========================================================================
+
+LAND_USE_CACHE_FILE: Path = DATA_DIR / "land_use.geojson"
+
+
+def fetch_and_cache_land_use(
+    bbox: tuple[float, float, float, float] | None = None,
+    output_path: Path | None = None,
+) -> dict:
+    """
+    Fetch vector land-use polygons covering our Faridabad tile from the
+    official FMDA Land Use ArcGIS REST API:
+    https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_Land_Use/MapServer/1/query
+
+    Query using tile bounding box (inSR=4326, outSR=4326, f=geojson,
+    outFields=Level1_des, where=1=1, returnGeometry=true), and cache locally
+    as data/land_use.geojson. Uses verify=False + LegacyRenegotiationAdapter.
+    """
+    target_path = output_path or LAND_USE_CACHE_FILE
+    if target_path.exists():
+        try:
+            log.info("Loading cached baseline land-use GeoJSON from %s", target_path)
+            return json.loads(target_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("Could not parse cached land-use GeoJSON: %s. Re-fetching.", exc)
+
+    session = requests.Session()
+    session.mount("https://", LegacyRenegotiationAdapter())
+
+    # Default tile bounding box in EPSG:4326 (min_lon, min_lat, max_lon, max_lat)
+    if bbox is not None:
+        min_lon, min_lat, max_lon, max_lat = bbox
+    else:
+        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
+
+    params = {
+        "where": "1=1",
+        "geometry": f"{min_lon},{min_lat},{max_lon},{max_lat}",
+        "geometryType": "esriGeometryEnvelope",
+        "spatialRel": "esriSpatialRelIntersects",
+        "inSR": "4326",
+        "outSR": "4326",
+        "outFields": "Level1_des",
+        "returnGeometry": "true",
+        "f": "geojson",
+    }
+
+    log.info("Querying FMDA MapServer land-use layer for bbox [%s]...", params["geometry"])
+    resp = session.get(FMDA_LAND_USE_QUERY_URL, params=params, verify=False, timeout=30)
+    resp.raise_for_status()
+    geojson_data = resp.json()
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(geojson_data, indent=2), encoding="utf-8")
+    log.info("Saved %d land-use features to %s", len(geojson_data.get("features", [])), target_path)
+    return geojson_data
+
+
+def enrich_clusters_with_land_use(
+    clusters: list[dict],
+    ndvi_data: dict,
+    geojson_data: dict | None = None,
+) -> list[dict]:
+    """
+    For each detected disturbance cluster:
+      1. Spatial intersection with FMDA vector polygons to compute its dominant
+         baseline land use from Level1_des (e.g. 'Agriculture Cropland', 'Forest',
+         'Waterbody Canal').
+      2. Flag if within 100m of a waterbody (near_water = True).
+      3. Compute priority score based on cluster area, mean NDVI drop, near_water,
+         and baseline zoning severity.
+    """
+    if geojson_data is None:
+        geojson_data = fetch_and_cache_land_use()
+
+    features = geojson_data.get("features", [])
+    polygons: list[tuple[object, str]] = []
+    water_polys: list[object] = []
+
+    for f in features:
+        try:
+            geom = shape(f["geometry"])
+            cls_name = f.get("properties", {}).get("Level1_des", "Unclassified")
+            polygons.append((geom, cls_name))
+            if "water" in cls_name.lower():
+                water_polys.append(geom)
+        except Exception as exc:
+            log.warning("Skipping feature geometry: %s", exc)
+
+    transform = ndvi_data["transform"]
+
+    for c in clusters:
+        r_min, c_min, r_max, c_max = c["bbox"]
+        lon1, lat1 = rio_xy(transform, r_min, c_min)
+        lon2, lat2 = rio_xy(transform, r_max, c_max)
+        c_box = box(min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2))
+        c_point = Point(c["lon"], c["lat"])
+
+        # Spatial intersection for dominant baseline land use
+        intersections: dict[str, float] = {}
+        for geom, cls_name in polygons:
+            if c_box.intersects(geom):
+                inter_area = c_box.intersection(geom).area
+                intersections[cls_name] = intersections.get(cls_name, 0.0) + inter_area
+
+        if intersections:
+            dominant_class = max(intersections, key=intersections.get)
+        else:
+            containing = [cls_name for geom, cls_name in polygons if geom.contains(c_point)]
+            dominant_class = containing[0] if containing else "Agriculture Cropland"
+
+        # Waterbody proximity (< 100m buffer)
+        # At latitude ~28.3°N, 1 degree ~ 111,000 meters
+        near_water = False
+        min_water_dist_m = 999999.0
+        for wg in water_polys:
+            dist_m = c_point.distance(wg) * 111000.0
+            if dist_m < min_water_dist_m:
+                min_water_dist_m = dist_m
+            if dist_m <= 100.0:
+                near_water = True
+
+        # Priority scoring:
+        # - Cluster area factor: larger clearing = higher impact (0 to 35 pts)
+        # - NDVI drop severity: higher drop = more severe clearing (0 to 35 pts)
+        # - Waterbody buffer violation (<100m violates canal/lake buffers): +20 pts
+        # - Agricultural/forest conversion: +10 pts
+        pix = c["pixel_count"]
+        ndvi_drop = c["ndvi_drop_mean"]
+        area_norm = min(1.0, pix / 1000.0)
+        ndvi_norm = min(1.0, max(0.0, (ndvi_drop - 0.15) / 0.35))
+        water_bonus = 20.0 if near_water else 0.0
+        agri_bonus = 10.0 if any(k in dominant_class.lower() for k in ["agri", "forest", "crop"]) else 0.0
+
+        priority_score = round((area_norm * 35.0) + (ndvi_norm * 35.0) + water_bonus + agri_bonus, 1)
+
+        c["dominant_class"] = dominant_class
+        c["near_water"] = near_water
+        c["water_dist_m"] = round(min_water_dist_m, 1)
+        c["priority_score"] = priority_score
+
+    # Sort candidates by priority score descending
+    candidates = [c for c in clusters if c["status"] == "CANDIDATE"]
+    candidates.sort(key=lambda x: x["priority_score"], reverse=True)
+    suppressed = [c for c in clusters if c["status"] == "SUPPRESSED"]
+
+    return candidates + suppressed
+
+
+# ===========================================================================
 # TASK 3 — Pydantic Model + Bedrock Verification
 # ===========================================================================
 
@@ -327,13 +507,20 @@ from May 2025, centred at approximately {lat:.5f}°N, {lon:.5f}°E.
 The algorithmic pipeline has detected a mean NDVI drop of {ndvi_drop:.3f} \
 in this region since December 2024, suggesting rapid vegetation clearing.
 
+Official Baseline Context (FMDA Survey):
+- Baseline Land Use (FMDA survey): {dominant_class}
+- Near Water: {near_water}
+
 Your task:
 1. Visually inspect the image for signs of unauthorized construction or \
 land carving: dirt road grids, boundary wall foundations, soil compaction \
 patterns, plot subdivision markings.
-2. Distinguish these from natural causes (seasonal dry-out, harvested \
+2. Consider the previous agricultural/vegetative baseline when evaluating \
+disturbance legitimacy. Clearings on designated agricultural cropland or \
+within waterbody buffer zones (<100m) represent severe regulatory violations.
+3. Distinguish these from natural causes (seasonal dry-out, harvested \
 fields) or sensor artefacts.
-3. Return ONLY a JSON object — no preamble, no markdown — matching this \
+4. Return ONLY a JSON object — no preamble, no markdown — matching this \
 exact schema:
 {{
   "parcel_id": "{parcel_id}",
@@ -372,10 +559,15 @@ def call_bedrock_verification(
         cluster["bbox"], ndvi_data["shape"], T1_VISUAL
     )
 
+    dominant_class = cluster.get("dominant_class", "Agriculture Cropland")
+    near_water = cluster.get("near_water", False)
+
     prompt_text = _VERIFICATION_PROMPT.format(
         lat=cluster["lat"],
         lon=cluster["lon"],
         ndvi_drop=cluster["ndvi_drop_mean"],
+        dominant_class=dominant_class,
+        near_water=near_water,
         parcel_id=parcel_id,
     )
 
@@ -471,10 +663,11 @@ def run_detection() -> tuple[dict, list[dict]]:
 
     Returns:
         ndvi_data  — raw arrays + transform
-        clusters   — list of cluster dicts with status tags
+        clusters   — list of cluster dicts enriched with baseline land use & priority score
     """
     ndvi_data = load_and_compute_ndvi()
     clusters = extract_clusters(ndvi_data)
+    clusters = enrich_clusters_with_land_use(clusters, ndvi_data)
     return ndvi_data, clusters
 
 

@@ -199,6 +199,9 @@ else:
         {
             "Cluster ID": c["id"],
             "Status": c["status"],
+            "Priority Score": c.get("priority_score", 0.0),
+            "Baseline Land Use (FMDA)": c.get("dominant_class", "Agriculture Cropland"),
+            "Near Water (<100m)": "🚨 Yes" if c.get("near_water") else "No",
             "Pixels": c["pixel_count"],
             "Fill Ratio": f"{c['fill_ratio']:.4f}",
             "NDVI Δ (mean)": f"{c['ndvi_drop_mean']:.4f}",
@@ -226,11 +229,50 @@ else:
     m3.metric("SUPPRESSED (artifact)", n_supp)
 
 # ---------------------------------------------------------------------------
-# TASK 5-4 / 5-5 — AI Verification + Folium Map (per CANDIDATE cluster)
+# Government Action Queue (Ranked Priority & FMDA Baseline Land Use)
 # ---------------------------------------------------------------------------
 candidates = [c for c in clusters if c["status"] == "CANDIDATE"]
 
 if candidates:
+    st.markdown("---")
+    st.markdown("## 🏛️ Government Action Queue (Ranked Interdiction Priority)")
+    st.caption(
+        "Interdiction candidates ranked by enforcement urgency. Scoring fuses Sentinel-2 vegetation clearing drop "
+        "(NDVI Δ), disturbance footprint, official **FMDA baseline land use** (Level1_des), and **100m waterbody buffer** proximity."
+    )
+
+    action_queue_data = [
+        {
+            "Rank": idx,
+            "Priority Score": c.get("priority_score", 0.0),
+            "Cluster ID": c["id"],
+            "Baseline Land Use (FMDA survey)": c.get("dominant_class", "Agriculture Cropland"),
+            "Near Waterbody (<100m)": "🚨 YES" if c.get("near_water") else "No",
+            "NDVI Δ (Drop)": f"{c['ndvi_drop_mean']:.4f}",
+            "Footprint (Pixels)": c["pixel_count"],
+            "Fill Ratio": f"{c['fill_ratio']:.4f}",
+            "Coordinates": f"{c['lat']}°N, {c['lon']}°E",
+        }
+        for idx, c in enumerate(candidates, 1)
+    ]
+    df_queue = pd.DataFrame(action_queue_data)
+
+    def _style_queue(row):
+        styles = [""] * len(row)
+        score = row["Priority Score"]
+        if score >= 50:
+            styles[1] = "background-color:#fee2e2; color:#991b1b; font-weight:700;"
+        elif score >= 30:
+            styles[1] = "background-color:#fef3c7; color:#92400e; font-weight:700;"
+        else:
+            styles[1] = "background-color:#e0f2fe; color:#075985; font-weight:600;"
+        if row["Near Waterbody (<100m)"] == "🚨 YES":
+            styles[4] = "background-color:#fee2e2; color:#991b1b; font-weight:700;"
+        return styles
+
+    styled_queue = df_queue.style.apply(_style_queue, axis=1)
+    st.dataframe(styled_queue, width="stretch", hide_index=True)
+
     st.markdown("---")
     st.markdown("## AI Verification — AWS Bedrock / Claude")
 
@@ -239,18 +281,19 @@ if candidates:
         selected_cluster = candidates[0]
     else:
         cluster_labels = {
-            f"Cluster {c['id']}  |  NDVI Δ {c['ndvi_drop_mean']:.4f}  |  ({c['lat']}, {c['lon']})": c
-            for c in candidates
+            f"Rank #{idx} | Cluster {c['id']} | Priority: {c.get('priority_score', 0)} | {c.get('dominant_class', 'Agriculture')} | NDVI Δ {c['ndvi_drop_mean']:.4f}": c
+            for idx, c in enumerate(candidates, 1)
         }
         chosen_label = st.selectbox("Select CANDIDATE cluster to verify:", list(cluster_labels))
         selected_cluster = cluster_labels[chosen_label]
 
     st.markdown(
-        f"**Selected cluster:** `ID {selected_cluster['id']}`  "
-        f"· pixels={selected_cluster['pixel_count']}  "
-        f"· fill_ratio={selected_cluster['fill_ratio']}  "
-        f"· NDVI Δ={selected_cluster['ndvi_drop_mean']:.4f}  "
-        f"· ({selected_cluster['lat']}°N, {selected_cluster['lon']}°E)"
+        f"**Selected Cluster:** `ID {selected_cluster['id']}` &nbsp;|&nbsp; "
+        f"**Priority Score:** `{selected_cluster.get('priority_score', 'N/A')}` &nbsp;|&nbsp; "
+        f"**Baseline Land Use (FMDA):** `{selected_cluster.get('dominant_class', 'Agriculture Cropland')}` &nbsp;|&nbsp; "
+        f"**Near Waterbody (<100m):** `{'🚨 Yes' if selected_cluster.get('near_water') else 'No'}` &nbsp;|&nbsp; "
+        f"**NDVI Δ:** `{selected_cluster['ndvi_drop_mean']:.4f}` &nbsp;|&nbsp; "
+        f"**Pixels:** `{selected_cluster['pixel_count']}`"
     )
 
     # Bedrock Model & Region Configuration
@@ -360,6 +403,14 @@ if candidates:
         badge_color = "#b91c1c" if is_flag else "#15803d"
         badge_bg = "#fee2e2" if is_flag else "#dcfce7"
 
+        land_use_text = selected_cluster.get('dominant_class', 'Agriculture Cropland')
+        water_dist_val = selected_cluster.get('water_dist_m', 'N/A')
+        water_prox_text = (
+            "🚨 Within 100m Buffer Zone"
+            if selected_cluster.get("near_water")
+            else f"Outside 100m Buffer ({water_dist_val} m)"
+        )
+
         st.markdown(
             f"""
             <div class="alert-card {card_cls}">
@@ -371,8 +422,16 @@ if candidates:
                 </div>
                 <table style="width:100%; border-collapse:collapse; color:#1f2937 !important;">
                 <tr>
-                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; width:140px;">Violation Type</td>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; width:170px;">Violation Type</td>
                     <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{report.violation_type}</td>
+                </tr>
+                <tr>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">Baseline Land Use (FMDA)</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{land_use_text}</td>
+                </tr>
+                <tr>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">Waterbody Proximity</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{water_prox_text}</td>
                 </tr>
                 <tr>
                     <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">AI Confidence</td>
@@ -407,16 +466,25 @@ if candidates:
                     except Exception as exc:
                         st.error(f"S3 upload failed: {exc}")
 
-        # ── TASK 5-5: Folium satellite map ─────────────────────────────────
-        st.markdown("### 📍 Disturbance Location — Satellite View")
+        # ── TASK 5-5: Folium satellite map + Master Plan 2031 ──────────────
+        st.markdown("### 📍 Disturbance Location — Satellite & Master Plan View")
+
+        show_master_plan = st.checkbox(
+            "🗺️ Overlay Live FMDA Master Plan 2031 (Zoning & Land Use)",
+            value=True,
+            help="Overlays the official FMDA Master Plan 2031 MapServer layer as a semi-transparent WMS layer (opacity: 0.55).",
+        )
 
         lat = selected_cluster["lat"]
         lon = selected_cluster["lon"]
         ndvi_drop = selected_cluster["ndvi_drop_mean"]
         pixel_count = selected_cluster["pixel_count"]
+        dominant_lu = selected_cluster.get("dominant_class", "Agriculture Cropland")
+        near_water_flag = selected_cluster.get("near_water", False)
+        priority_sc = selected_cluster.get("priority_score", 0.0)
 
         # Approx radius from pixel count (assuming ~10 m Sentinel-2 pixels)
-        radius_m = int(((pixel_count * 100) / 3.14159) ** 0.5)   # circle area ≈ pixels × 10²
+        radius_m = int(((pixel_count * 100) / 3.14159) ** 0.5)
 
         fmap = folium.Map(
             location=[lat, lon],
@@ -426,17 +494,33 @@ if candidates:
             attr="Esri World Imagery",
         )
 
+        # Live FMDA Master Plan 2031 overlay
+        if show_master_plan:
+            folium.raster_layers.WmsTileLayer(
+                url="https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_MasterPlan2031/MapServer/export",
+                layers="show:0",
+                name="FMDA Master Plan 2031",
+                fmt="image/png",
+                transparent=True,
+                opacity=0.55,
+                overlay=True,
+                control=True,
+            ).add_to(fmap)
+
         folium.Marker(
             location=[lat, lon],
             popup=folium.Popup(
                 f"<b>Cluster {selected_cluster['id']}</b><br>"
-                f"NDVI Δ: {ndvi_drop:.4f}<br>"
-                f"Pixels: {pixel_count}<br>"
-                f"Fill Ratio: {selected_cluster['fill_ratio']}<br>"
-                f"Status: {selected_cluster['status']}",
-                max_width=220,
+                f"<b>Priority Score:</b> {priority_sc}<br>"
+                f"<b>Baseline Land Use (FMDA):</b> {dominant_lu}<br>"
+                f"<b>Near Water:</b> {'🚨 Yes (<100m)' if near_water_flag else 'No'}<br>"
+                f"<b>NDVI Δ:</b> {ndvi_drop:.4f}<br>"
+                f"<b>Pixels:</b> {pixel_count}<br>"
+                f"<b>Fill Ratio:</b> {selected_cluster['fill_ratio']}<br>"
+                f"<b>Status:</b> {selected_cluster['status']}",
+                max_width=260,
             ),
-            tooltip="🔴 Flagged disturbance",
+            tooltip=f"🔴 Flagged disturbance (Score: {priority_sc})",
             icon=folium.Icon(color="red", icon="exclamation-triangle", prefix="fa"),
         ).add_to(fmap)
 
@@ -449,6 +533,8 @@ if candidates:
             fill_opacity=0.20,
             tooltip=f"Approx. disturbed area (~{radius_m} m radius)",
         ).add_to(fmap)
+
+        folium.LayerControl(position="topright").add_to(fmap)
 
         st_folium(fmap, width="100%", height=480, returned_objects=[])
 
