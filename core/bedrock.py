@@ -231,7 +231,7 @@ def call_bedrock_verification(
         image_bytes = _crop_stac_visual(cluster, ndvi_data, "scene_t1")
     else:
         image_bytes = _crop_visual_image(
-            cluster["bbox"], ndvi_data["shape"], "visual"
+            cluster["bbox"], ndvi_data["shape"], T1_VISUAL
         )
 
     dominant_class = cluster.get("dominant_class", "Agriculture Cropland")
