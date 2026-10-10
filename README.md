@@ -1,135 +1,123 @@
-# GroundTruth: DTP Enforcement Radar 🛰️
+# GroundTruth — DTP Enforcement Radar & UHI Risk Pipeline
 
-Early-warning enforcement dashboard for the **District Town Planner (DTP) in Faridabad**.
+![GroundTruth Header](Data/background_image.jpg)
 
-GroundTruth detects unauthorized colonies and illegal plot carving on agricultural land **before** permanent concrete structures are constructed. By fusing multi-spectral satellite analysis (Sentinel-2 NDVI drop) with automated artifact suppression and multimodal LLM verification (Claude on AWS Bedrock), GroundTruth provides an auditable, cost-efficient, and rapid interdiction workflow.
+**GroundTruth** is an enterprise-grade satellite surveillance dashboard built for the District Town Planner (DTP) of Faridabad. It acts as an automated, cloud-native radar to detect unauthorized colonies and illegal plot carving on agricultural lands. 
 
----
+By detecting early-stage vegetation loss, the pipeline not only enforces statutory zoning but also identifies the destruction of critical thermal buffers—serving as a frontline defense against **Urban Heat Island (UHI)** formation and light pollution. It fuses AWS Open Data, geospatial algorithms, and Multimodal Generative AI (Amazon Bedrock) into a highly actionable GovTech dashboard.
 
-## 🌟 The Problem & Solution
-
-1. **The Challenge:** Enforcing land-use regulations after permanent buildings or boundary walls are built leads to expensive litigation, demolition resistance, and irreversible loss of arable land.
-2. **Early Detection:** Illegal colonies begin with subtle activities: vegetation clearing, dirt road carving, and boundary demarcation.
-3. **Low-Cost, High-Precision Pipeline:**
-   - **Multi-Spectral Anomaly Detection:** Compares baseline farmland ($T_0$) with recent passes ($T_1$) using Sentinel-2 B04 (Red) and B08 (NIR) bands to calculate vegetation drop ($\Delta\text{NDVI} > 0.15$).
-   - **Algorithmic Artifact Suppression:** Labels connected components and filters sensor swath edges / nodata artifacts using bounding box fill-ratio heuristics ($\ge 0.58$), saving unnecessary AI inference costs.
-   - **Multimodal AI Verification:** Dispatches genuine candidate coordinate crops to **Claude Sonnet on AWS Bedrock** to visually identify road grids, plot boundaries, and soil compaction.
-   - **Enforcement Dashboard:** Visualizes parcel lifecycles, artifact suppression logs, structured interdiction reports, and interactive satellite maps via Folium.
+*Built for the WeMakeDevs / AWS Hackathon.*
 
 ---
 
-## 🏗️ Architecture
+## 🚀 Key Features
 
-```
-Sentinel-2 Imagery (T0: Baseline, T1: Recent)
-                     │
-                     ▼
-          [ NDVI Delta Calculation ]
-            NDVI = (NIR - Red) / (NIR + Red)
-            Flag if (NDVI_t0 - NDVI_t1) > 0.15
-                     │
-                     ▼
-       [ Connected Component Clustering ]
-           scipy.ndimage.label + Bounding Box
-                     │
-                     ▼
-          [ Artifact Filter (Fill-Ratio) ]
-          ┌──────────┴──────────┐
-          ▼                     ▼
-     SUPPRESSED             CANDIDATE
- (Sensor / Swath)        (Genuine Anomaly)
-  (Zero AI Cost)                │
-                                ▼
-                    [ AWS Bedrock / Claude ]
-                  Multimodal Vision Analysis
-                                │
-                                ▼
-                    [ Pydantic Report ]
-                 InterdictionReport (JSON)
-                                │
-                                ▼
-                     [ Streamlit UI & Maps ]
-                    Interactive Satellite View
+1. **Cloud-Native STAC Ingestion (AWS Open Data):** Streams 10m-resolution Sentinel-2 L2A Cloud-Optimized GeoTIFFs (COGs) directly from Amazon S3 via the STAC API. Completely bypasses massive local downloads using targeted windowed reads.
+2. **Morphological Pruning & Clustering:** Uses `scipy.ndimage` to compute NDVI drops, extract contiguous clusters, and calculate geometric fill-ratios to automatically suppress harvest noise and sensor artifacts.
+3. **FMDA GIS Cross-Referencing:** Spatially joins anomaly clusters with Faridabad Master Plan 2031 and official Baseline Land Use cadastral surveys (e.g., "Agriculture Cropland", waterbody proximity).
+4. **Multimodal AI Verification (Amazon Bedrock):** Dispatches high-probability anomaly crops to Amazon Bedrock (Claude). The LLM acts as a forensic visual inspector, verifying anthropogenic concrete carving vs. natural drying, assigning a 0–100% confidence score, and evaluating UHI risks.
+5. **Urban Climate Resilience (UHI):** Translates "Agricultural Land At Risk" into "Thermal Buffer Zone Lost", creating a direct action queue for government reclamation and plantation drives.
+6. **Professional GovTech UI:** A sleek, high-contrast, dark-themed Streamlit dashboard featuring detection funnels, ranked action queues, and interactive Folium cartography.
+
+---
+
+## 🏗️ Architecture & Folder Structure
+
+The project has been heavily refactored for maintainability and modularity:
+
+```text
+GroundTruth/
+├── .streamlit/
+│   └── config.toml           # AWS dark theme configurations
+├── core/
+│   ├── bedrock.py            # AWS Bedrock/Claude invocation, AI prompts, and S3 uploads
+│   ├── detection.py          # NDVI calculation, clustering, and morphological pruning
+│   └── stac_ingestion.py     # pystac-client search, COG window reads, and timeseries caching
+├── frontend/
+│   └── app.py                # Main Streamlit dashboard UI
+├── integrations/
+│   └── fmda.py               # Spatially joining clusters with FMDA Land Use / Master Plan
+├── utils/
+│   └── config.py             # Constants, threshold variables, region bounding boxes
+├── Data/
+│   ├── background_image.jpg  # Hero background image
+│   └── cache/                # STAC queries cache (.npz, .json) for instant reloads
+├── requirements.txt          # Python dependencies
+├── .env.example              # Template for environment variables
+└── README.md                 # Project documentation
 ```
 
 ---
 
-## 🚀 Getting Started
+## ⚙️ Technology Stack & Dependencies
 
-### 1. Prerequisites
-- Python 3.10+
-- AWS Account with Amazon Bedrock access to Anthropic Claude models (e.g., `au.anthropic.claude-sonnet-4-6` or `apac.anthropic.claude-3-5-sonnet-20241022-v2:0`)
+*   **Frontend / UI:** [Streamlit](https://streamlit.io/), `folium`, `streamlit-folium`, `pandas`
+*   **Geospatial & Ingestion:** `pystac-client`, `rasterio`, `shapely`, `pyproj`
+*   **Algorithms & Math:** `numpy`, `scipy`
+*   **Cloud & AI (AWS):** `boto3` (Amazon Bedrock Runtime, Amazon S3)
 
-### 2. Installation
+---
 
-Clone this repository and install dependencies:
+## 🛠️ Installation and Setup
 
+### 1. Clone the Repository
 ```bash
-git clone https://github.com/<your-username>/GroundTruth.git
+git clone https://github.com/yourusername/GroundTruth.git
 cd GroundTruth
+```
+
+### 2. Create a Virtual Environment (Optional but Recommended)
+```bash
+python -m venv venv
+# On Windows
+venv\Scripts\activate
+# On macOS/Linux
+source venv/bin/activate
+```
+
+### 3. Install Dependencies
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure AWS Credentials
+### 4. Environment Variables
+Create a `.env` file in the root directory (or copy `.env.example`) and configure your AWS credentials to enable Amazon Bedrock and S3 uploads:
 
-Ensure your AWS credentials and region are set:
-
-```powershell
-# Windows PowerShell
-$env:AWS_ACCESS_KEY_ID = "YOUR_ACCESS_KEY"
-$env:AWS_SECRET_ACCESS_KEY = "YOUR_SECRET_KEY"
-$env:AWS_DEFAULT_REGION = "ap-southeast-2"
+```env
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_DEFAULT_REGION=us-west-2
+# Ensure your IAM role has access to Bedrock models (e.g., anthropic.claude-3-5-sonnet-20241022-v2:0)
 ```
 
-### 4. Run the Dashboard
+*(Note: STAC API reads from the AWS Earth Search registry are anonymous and do not require signed requests).*
+
+---
+
+## 💻 Usage Instructions
+
+### Running the Dashboard
+Launch the Streamlit application using the following command from the root directory:
 
 ```bash
-streamlit run app.py
+streamlit run frontend/app.py
 ```
 
-Open your browser at `http://localhost:8501`.
+### Dashboard Workflow
+1. **Landing Page:** You will be greeted by the AWS Cloud architecture overview.
+2. **Scan Parameters (Sidebar):** Select your target region (e.g., "Ballabgarh Agro Belt") and a timeframe (Live Rapid Surveillance or Historical Audit).
+3. **Run Satellite Scan:** Click the primary button. The pipeline will:
+   * Query the STAC API for the best cloud-free T0 and T1 Sentinel-2 scenes.
+   * Compute the NDVI anomaly mask natively on the cloud.
+   * Filter, prune, and cross-reference the data with FMDA GIS layers.
+4. **Action Queue:** Review the "Environmental Impact & UHI Risk Summary". High-priority candidates will be listed in a ranked dataframe.
+5. **AI Verification:** Select a candidate cluster and click **"Dispatch Coordinates to AWS Bedrock"**. Claude will analyze the visual crop and provide an official Interdiction Report (FLAG_FOR_REVIEW or SUPPRESS).
+6. **Folium Map:** Explore the interactive map at the bottom to view the exact cluster bounds overlaid on the statutory Master Plan 2031 zoning layer.
 
 ---
 
-## 📂 Project Structure
+## 🤝 License & Acknowledgements
 
-```
-GroundTruth/
-├── app.py              # Streamlit enforcement radar UI & Folium maps
-├── pipeline.py         # Geospatial NDVI processing, artifact filter & Bedrock client
-├── requirements.txt    # Python dependencies
-├── .gitignore          # Git exclusion rules
-├── README.md           # Documentation
-└── Data/               # Satellite data
-    ├── t0_b04.tif.tiff # T0 Red band (Dec 2024)
-    ├── t0_b08.tif.tiff # T0 NIR band (Dec 2024)
-    ├── t0_visual.png   # T0 True-color composite
-    ├── t1_b04.tif.tiff # T1 Red band (May 2025)
-    ├── t1_b08.tif.tiff # T1 NIR band (May 2025)
-    └── t1_visual.png   # T1 True-color composite
-```
-
----
-
-## 🚀 Recent Updates
-
-- **NumPy Soft-Alpha Master Plan Overlay:** Applied a dynamic server-side Python (NumPy) alpha mask to instantly remove the solid white background on the FMDA ArcGIS Master Plan exports while preserving the tinted statutory grid overlay, seamlessly integrating with Folium.
-- **Live FMDA REST Legend Integration:** Fetches canonical cartographic symbology rules directly from the state GIS MapServer `/legend?f=json` endpoints. Utilizes a custom `LegacyRenegotiationAdapter` (on `requests.Session`) to bypass outdated OpenSSL protocol errors when connecting to the government server.
-- **Deterministic AI Verification:** Calibrated the AWS Bedrock/Claude prompt to focus strictly on physical ground alterations rather than making definitive legal judgments. Set inference configuration to `temperature: 0.0, maxTokens: 600` for highly deterministic, repeatable outputs.
-- **Environmental Impact Panel:** Included a high-level Streamlit metric dashboard that aggregates pixel cluster counts, converting footprints to hectares and flagging intersection violations with protected agricultural land and 100m waterbody buffers.
-
----
-
-## 📄 Output Schema: Interdiction Report
-
-When coordinates are dispatched to AWS Bedrock, Claude returns structured JSON validated against the `InterdictionReport` Pydantic model:
-
-```json
-{
-  "parcel_id": "FARIDABAD-001",
-  "confidence": 0.92,
-  "violation_type": "Unauthorized Plot Carving / Road Grid",
-  "action": "FLAG_FOR_REVIEW",
-  "reasoning": "Linear soil compaction patterns and rectangular plot subdivisions visible across former agricultural parcel."
-}
-```
+Developed for the **WeMakeDevs / AWS Hackathon**.
+Satellite Imagery provided by ESA / Copernicus via AWS Open Data (Earth Search by Element 84).
+Master Plan / GIS layers utilized for hackathon demonstration purposes (mock integrations inspired by FMDA).

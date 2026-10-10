@@ -27,3 +27,7 @@ dist/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Data caches
+Data/cache/
+Data/live_crops/
