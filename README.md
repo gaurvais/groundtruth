@@ -80,18 +80,13 @@ GroundTruth/
 
 | Region | Scan Window (T0 vs T1) | Raw Extracted | Suppressed (Artifacts) | Watchlist | Candidates | Verified Outcome |
 |--------|-----------------------|---------------|-------------------|------------|-----------------------|------------------|
-| **Ballabgarh Agro Belt** | Aug 21, 2024 vs Sep 15, 2024 | 45 | 32 | 13 | 0 | 1 known positive (~1 ha) flagged successfully |
-| **Aravalli Ridge Corridor** | Sep 30, 2024 vs Oct 10, 2024 | 28 | 15 | 13 | 0 | Cluster 8 flagged for review; NDVI history suggests a possible crop cycle |
+| **Ballabgarh Agro Belt** | Aug 21, 2024 vs Sep 15, 2024 | 45 | 32 | 13 | 0 | 1 known positive (~1 ha) flagged successfully. Cluster 8 flagged for review; NDVI history suggests possible crop cycle. |
+| **Aravalli Ridge Corridor** | Sep 30, 2026 vs Oct 10, 2026 | 28 | 15 | 13 | 0 | Live surveillance test boundary |
 
 *(Note: Validation metrics above represent specific benchmark tests during the hackathon development phase).*
 
 ### Screenshots
-* `![Detection Funnel](path/to/funnel.png)`
-* `![NDVI Timeseries](path/to/timeseries.png)`
-* `![Action Queue](path/to/queue.png)`
-* `![Bedrock JSON Output](path/to/bedrock.png)`
-* `![Map Overlay](path/to/map.png)`
-
+<!-- TODO: Insert screenshot images here -->
 ---
 
 ## 🚧 Limitations & Guardrails
@@ -117,13 +112,13 @@ cd groundtruth
 ```
 
 ### 2. Environment Variables
-Copy `.env.example` to `.env` and add your AWS credentials. Bedrock requires access to Claude 3.5 Sonnet in `us-west-2` (or your configured region).
+Copy `.env.example` to `.env` and add your AWS credentials. Bedrock requires access to Claude Sonnet 4.6 in `ap-southeast-2` (or your configured region).
 
 ```env
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_DEFAULT_REGION=us-west-2
-BEDROCK_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
+AWS_DEFAULT_REGION=ap-southeast-2
+GROUNDTRUTH_BEDROCK_MODEL=au.anthropic.claude-sonnet-4-6
 ```
 
 ### 3. Install & Run
