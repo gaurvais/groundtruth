@@ -207,6 +207,61 @@ def pick_scenes(
     }
 
 
+
+def cached_pick_scenes(bbox_lonlat, t1_target_date=None, force_dates=None):
+    import json
+    import hashlib
+    from pystac import Item
+    
+    if t1_target_date is None:
+        t1_target_date = dt.date.today()
+        
+    # Serialize args for hash
+    def _str(d): return d.isoformat() if isinstance(d, dt.date) else str(d)
+    fd_str = f"{_str(force_dates[0])}_{_str(force_dates[1])}" if force_dates else "None"
+    s = f"{bbox_lonlat}_{_str(t1_target_date)}_{fd_str}"
+    cache_key = hashlib.md5(s.encode()).hexdigest()
+    
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = CACHE_DIR / f"pick_scenes_{cache_key}.json"
+    
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r") as f:
+                data = json.load(f)
+            log.info(f"Loaded STAC metadata from JSON cache: {cache_file.name}")
+            return {
+                "t1_item": Item.from_dict(data["t1_item"]),
+                "t0_item": Item.from_dict(data["t0_item"]),
+                "t1_valid_frac": data["t1_valid_frac"],
+                "t0_valid_frac": data["t0_valid_frac"],
+                "t1_date": dt.date.fromisoformat(data["t1_date"]),
+                "t0_date": dt.date.fromisoformat(data["t0_date"]),
+                "mgrs_tile": data["mgrs_tile"],
+            }
+        except Exception as e:
+            log.warning(f"Failed to load pick_scenes cache: {e}")
+            
+    res = pick_scenes(bbox_lonlat, t1_target_date, force_dates)
+    
+    try:
+        data = {
+            "t1_item": res["t1_item"].to_dict(),
+            "t0_item": res["t0_item"].to_dict(),
+            "t1_valid_frac": res["t1_valid_frac"],
+            "t0_valid_frac": res["t0_valid_frac"],
+            "t1_date": res["t1_date"].isoformat(),
+            "t0_date": res["t0_date"].isoformat(),
+            "mgrs_tile": res["mgrs_tile"],
+        }
+        with open(cache_file, "w") as f:
+            json.dump(data, f)
+        log.info(f"Saved STAC metadata to JSON cache: {cache_file.name}")
+    except Exception as e:
+        log.warning(f"Failed to save pick_scenes cache: {e}")
+        
+    return res
+
 def _find_item_on_date(catalog, bbox_lonlat, aoi_geom, target_date: dt.date):
     """Helper: find the best item on a specific date ± 1 day."""
     d0 = target_date - dt.timedelta(days=1)
@@ -362,7 +417,7 @@ def stac_compute_ndvi(
         return _load_stac_cache(cp)
 
     # --- Discover scenes ---
-    scenes = pick_scenes(bbox, target, force_dates=force_dates)
+    scenes = cached_pick_scenes(bbox, target, force_dates=force_dates)
     mgrs_tile = scenes["mgrs_tile"]
     cp = _cache_path(mgrs_tile, scenes["t0_date"], scenes["t1_date"], bbox)
 
