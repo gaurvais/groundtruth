@@ -1,10 +1,12 @@
 # GroundTruth — DTP Enforcement Radar & UHI Risk Pipeline
 
+**[Live App (TBD)]()** | **[Video Demo (TBD)]()** | **[DevPost Blog (TBD)]()**
+
 ![GroundTruth Header](Data/background_image.jpg)
 
 **GroundTruth** is an automated satellite surveillance dashboard built for the District Town Planner (DTP) of Faridabad. It acts as an early-warning radar to detect unauthorized colonies and illegal plot carving on agricultural lands. 
 
-By identifying sub-hectare vegetation loss, the pipeline flags the destruction of critical thermal buffers—triggering government enforcement before permanent concrete structures are laid. It fuses AWS Open Data, morphological algorithms, and Multimodal Generative AI (Amazon Bedrock) into an actionable GovTech decision-support tool.
+By identifying ~1 ha demonstrated vegetation loss, the pipeline flags the destruction of critical thermal buffers—with the intended goal of enabling government enforcement before permanent concrete structures are laid. It fuses AWS Open Data, morphological algorithms, and Multimodal Generative AI (Amazon Bedrock) into an actionable GovTech decision-support tool.
 
 *Built for the WeMakeDevs / AWS Hackathon.*
 
@@ -34,7 +36,7 @@ This unchecked concrete expansion destroys natural thermal buffers and creates m
 
 ## 🏆 Hackathon Track
 **Heat and Water**
-This pipeline directly mitigates Urban Heat Islands by empowering government forces (like the DTP) to reclaim and mandate plantation drives on illegally cleared agricultural land.
+This pipeline supports UHI mitigation by empowering government forces (like the DTP) to reclaim and mandate plantation drives on illegally cleared agricultural land.
 
 ---
 
@@ -44,7 +46,7 @@ This pipeline directly mitigates Urban Heat Islands by empowering government for
 2. **Morphological Pruning:** Uses `scipy.ndimage` to compute NDVI drops, extract contiguous clusters, and apply geometric fill-ratios (>= 0.65) to automatically suppress sensor swath-edge artifacts.
 3. **FMDA GIS Cross-Referencing:** Validates anomalies against the Faridabad Master Plan 2031 (Live State GIS Server) and Baseline Land Use (Mock/Cached).
 4. **Visual Triage Assistant (Amazon Bedrock):** Dispatches high-probability crops to Amazon Bedrock (Claude). The LLM acts as a triage assistant to recommend whether a field inspector is required.
-5. **Detection Floor:** Successfully demonstrated on sub-hectare clearing (approx. 1 ha baseline).
+5. **Detection Floor:** Successfully demonstrated on ~1 ha demonstrated clearing (approx. 1 ha baseline).
 
 ---
 
@@ -76,12 +78,10 @@ GroundTruth/
 
 ## 📊 Results & Benchmarks
 
-| Region | Scan Window (T0 vs T1) | Raw Anomalies | After Size Filter | Suppressed | Watchlist / Candidate | Verified Outcome |
+| Region | Scan Window (T0 vs T1) | Raw Extracted | Suppressed (Artifacts) | Watchlist | Candidates | Verified Outcome |
 |--------|-----------------------|---------------|-------------------|------------|-----------------------|------------------|
-| **Ballabgarh Agro Belt** | Aug 21, 2024 vs Sep 15, 2024 | ~204 | 45 | 32 | 13 | 1 known positive (~1 ha) flagged successfully |
-| **Aravalli Ridge Corridor** | Sep 30, 2024 vs Oct 10, 2024 | ~150 | 28 | 15 | 13 | Cluster 8 properly flagged (pending seasonal) |
-| **Neharpar Urban Ext.** | TBD | TBD | TBD | TBD | TBD | Pending field verification |
-| **Entire Faridabad** | TBD | ~800 | 114 | 85 | 29 | Stress-test boundary |
+| **Ballabgarh Agro Belt** | Aug 21, 2024 vs Sep 15, 2024 | 45 | 32 | 13 | 0 | 1 known positive (~1 ha) flagged successfully |
+| **Aravalli Ridge Corridor** | Sep 30, 2024 vs Oct 10, 2024 | 28 | 15 | 13 | 0 | Cluster 8 flagged for review; NDVI history suggests a possible crop cycle |
 
 *(Note: Validation metrics above represent specific benchmark tests during the hackathon development phase).*
 
@@ -100,7 +100,7 @@ GroundTruth/
 * **Resolution Limits:** Relies on Sentinel-2 10m resolution; cannot reliably detect clearing smaller than 0.5 ha.
 * **Cloud Cover:** Indian monsoon seasons (July-September) heavily obscure optical satellite visibility, limiting real-time response.
 * **Terrain Shadows:** Aravalli hill terrain shadows can occasionally trigger false-positive NDVI drops during winter sun angles.
-* **Seasonal Vegetation:** Agricultural crop cycles (harvesting) mimic plot carving. Requires temporal persistence tracking to avoid flagging bare winter fields.
+* **Seasonal Vegetation:** Agricultural crop cycles (harvesting) mimic plot carving. Requires temporal persistence tracking to avoid flagging bare winter fields. Note: Persistence tracking is a planned next step.
 
 ### Guardrails
 * **Bounded Scans:** Bound by 4 preset regional bounding boxes (e.g., Aravalli, Ballabgarh) to strictly cap memory consumption and STAC query volume.

@@ -170,7 +170,7 @@ def extract_clusters(ndvi_data: dict) -> list[dict]:
         # Artifact check
         artifact = is_artifact_shaped(comp_mask)
         is_stac = "scene_t1" in ndvi_data
-        status = "SUPPRESSED" if artifact else ("PROVISIONAL" if is_stac else "CANDIDATE")
+        status = "SUPPRESSED" if artifact else ("WATCHLIST" if is_stac else "CANDIDATE")
 
         cluster_dict = {
             "id": label_id,

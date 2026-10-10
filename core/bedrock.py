@@ -45,6 +45,9 @@ class InterdictionReport(BaseModel):
     violation_type: str
     action: Literal["FLAG_FOR_REVIEW", "SUPPRESS_NO_ACTION"]
     reasoning: str
+    model_used: str = ""
+    region_used: str = ""
+    raw_json: str = ""
 
     @field_validator("confidence")
     @classmethod
@@ -220,14 +223,7 @@ def call_bedrock_verification(
     """
     Crop the T2 (Post-Disturbance) visual around *cluster*, send to Claude via Bedrock converse,
     validate the response against InterdictionReport schema, and return it.
-
-    Only call for CANDIDATE clusters.
     """
-    if cluster["status"] == "SUPPRESSED":
-        raise ValueError(
-            f"Cluster {cluster['id']} is SUPPRESSED — Bedrock call skipped."
-        )
-
     target_model_id = model_id or BEDROCK_MODEL_ID
     target_region = region or AWS_REGION
 
@@ -235,14 +231,14 @@ def call_bedrock_verification(
         image_bytes = _crop_stac_visual(cluster, ndvi_data, "scene_t1")
     else:
         image_bytes = _crop_visual_image(
-            cluster["bbox"], ndvi_data["shape"], T1_VISUAL
+            cluster["bbox"], ndvi_data["shape"], "visual"
         )
 
     dominant_class = cluster.get("dominant_class", "Agriculture Cropland")
     near_water = cluster.get("near_water", False)
-
     t0_date = ndvi_data.get("t0_date", "baseline")
     t1_date = ndvi_data.get("t1_date", "post-disturbance")
+    
     prompt_text = _VERIFICATION_PROMPT.format(
         lat=cluster["lat"],
         lon=cluster["lon"],
@@ -255,49 +251,75 @@ def call_bedrock_verification(
     )
 
     client = boto3.client("bedrock-runtime", region_name=target_region)
+    max_retries = 3
+    base_delay = 2
 
-    response = client.converse(
-        modelId=target_model_id,
-        messages=[
-            {
-                "role": "user",
-                "content": [
+    for attempt in range(max_retries):
+        try:
+            response = client.converse(
+                modelId=target_model_id,
+                messages=[
                     {
-                        "image": {
-                            "format": "jpeg",
-                            "source": {"bytes": image_bytes},
-                        }
-                    },
-                    {"text": prompt_text},
+                        "role": "user",
+                        "content": [
+                            {
+                                "image": {
+                                    "format": "jpeg",
+                                    "source": {"bytes": image_bytes},
+                                }
+                            },
+                            {"text": prompt_text},
+                        ],
+                    }
                 ],
-            }
-        ],
-        inferenceConfig={"temperature": 0.0, "maxTokens": 600},
-    )
+                inferenceConfig={"temperature": 0.0, "maxTokens": 600},
+            )
 
-    raw_text: str = (
-        response.get("output", {})
-        .get("message", {})
-        .get("content", [{}])[0]
-        .get("text", "")
-    )
+            raw_text: str = (
+                response.get("output", {})
+                .get("message", {})
+                .get("content", [{}])[0]
+                .get("text", "")
+            )
 
-    log.info("Bedrock raw response: %s", raw_text[:300])
+            clean = raw_text.strip()
+            if clean.startswith("```"):
+                clean = clean.split("```")[1]
+                if clean.startswith("json"):
+                    clean = clean[4:]
 
-    # Strip optional markdown fences
-    clean = raw_text.strip()
-    if clean.startswith("```"):
-        clean = clean.split("```")[1]
-        if clean.startswith("json"):
-            clean = clean[4:]
+            report_dict = json.loads(clean)
+            report_dict["parcel_id"] = parcel_id
+            report = InterdictionReport(**report_dict)
+            
+            # Attach raw model details for the UI
+            report.model_used = target_model_id
+            report.region_used = target_region
+            report.raw_json = clean
+            
+            return report
 
-    report_dict = json.loads(clean)
-    report_dict["parcel_id"] = parcel_id        # enforce correct parcel_id
-    report = InterdictionReport(**report_dict)
-    return report
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            error_msg = e.response.get("Error", {}).get("Message", str(e))
+            log.warning(f"Bedrock ClientError ({error_code}): {error_msg}")
+            
+            if error_code in ["ThrottlingException", "ModelTimeoutException"]:
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+                    continue
+            raise RuntimeError(f"Bedrock API Error [{error_code}]: {error_msg}")
+            
+        except json.JSONDecodeError as e:
+            log.warning(f"Bedrock returned malformed JSON: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(base_delay)
+                continue
+            raise RuntimeError(f"Bedrock returned malformed JSON after {max_retries} attempts.")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected Bedrock error: {str(e)}")
 
-
-
+    raise RuntimeError("Max retries exceeded calling Bedrock.")
 
 
 def upload_to_s3(

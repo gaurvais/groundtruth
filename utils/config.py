@@ -143,3 +143,12 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 
+
+
+import math
+def calculate_scanned_ha(bbox):
+    lon_min, lat_min, lon_max, lat_max = bbox
+    mean_lat = (lat_min + lat_max) / 2.0
+    width_km = (lon_max - lon_min) * 111.32 * math.cos(math.radians(mean_lat))
+    height_km = (lat_max - lat_min) * 110.57
+    return width_km * height_km * 100

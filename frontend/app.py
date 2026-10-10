@@ -280,7 +280,7 @@ if lu_ha:
         color=alt.value("#4c78a8"),
         tooltip=["Land Use", "Area (ha)"]
     ).properties(height=350).configure_axis(labelFontSize=12, titleFontSize=14)
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width='stretch')
 
 # 4 — NDVI timeseries for best cluster (highest priority)
 st.markdown("### NDVI Timeseries — Top Cluster (12 months)")
@@ -318,7 +318,7 @@ if clusters:
             y=alt.Y("ndvi:Q", title="NDVI (10m Resolution)"),
             tooltip=["date:T", "ndvi:Q"]
         ).properties(height=300).configure_axis(labelFontSize=12, titleFontSize=14)
-        st.altair_chart(ts_chart, use_container_width=True)
+        st.altair_chart(ts_chart, width='stretch')
         st.caption(f"Cluster {top_cluster['id']} (Lat: {top_cluster['lat']}, Lon: {top_cluster['lon']}) — Harvest dips then regrows; sustained low NDVI is consistent with clearing. *Note: If NDVI strongly recovers later in the year, the initial drop was likely a seasonal harvest.*")
     else:
         st.info("Timeseries unavailable (STAC not reachable or no clear scenes found).")
@@ -379,18 +379,24 @@ else:
 # ---------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("## Environmental Impact & UHI Risk Summary")
+try:
+    from utils.config import calculate_scanned_ha
+    bbox = st.session_state.bbox
+    total_footprint_ha = calculate_scanned_ha(bbox)
+    
+    cand_ha = sum(c["pixel_count"] for c in clusters if c["status"] == "CANDIDATE") * 0.01
+    watch_ha = sum(c["pixel_count"] for c in clusters if c["status"] == "WATCHLIST") * 0.01
+    water_prox_count = sum(1 for c in clusters if c.get("near_water"))
 
-total_footprint_ha = ((bbox[2] - bbox[0]) * 111) * ((bbox[3] - bbox[1]) * 111) * 100
-at_risk_ha = sum(c["pixel_count"] for c in clusters if c["status"] in ("CANDIDATE", "WATCHLIST")) * 0.01
-water_prox_count = sum(1 for c in clusters if c.get("near_water"))
+    i1, i2, i3 = st.columns(3)
+    i1.metric("Area scanned (est. ha)", f"{total_footprint_ha:,.0f} ha")
+    i2.metric("Candidate (persistent)", f"{cand_ha:.2f} est. ha")
+    i3.metric("Watchlist (new, unconfirmed)", f"{watch_ha:.2f} est. ha")
 
-i1, i2, i3 = st.columns(3)
-i1.metric("Total Area Scanned (ha)", f"{total_footprint_ha:,.0f} ha")
-at_risk_label = f"{at_risk_ha:.2f} ha" if at_risk_ha > 0 else "0 ha (None Flagged)"
-i2.metric("Vegetation-change area flagged (est. ha)", at_risk_label)
-i3.metric("Critical Waterbody Proximity", f"{water_prox_count} Clusters")
-
-st.info("🌱 *Cleared zones identified above are prime candidates for immediate government reclamation and plantation drives to mitigate localized UHI effects.*")
+    st.caption("**Status Guide:** SUPPRESSED (geometric artifact), BELOW_THRESHOLD (seasonal/crop), WATCHLIST (new change, not yet confirmed), CANDIDATE (persistent). *Note: Persistence tracking is a planned next step. Until implemented, anomalies will remain WATCHLIST.*")
+    
+except Exception as e:
+    st.warning(f"Could not load summary metrics: {e}")
 
 candidates = [c for c in clusters if c["status"] in ("CANDIDATE", "WATCHLIST")]
 
@@ -460,7 +466,7 @@ if candidates:
     dispatch_btn = st.button(
         "Dispatch Coordinates to AWS Bedrock for Visual Verification",
         type="primary",
-        use_container_width=True,
+        width='stretch',
     )
 
     # Initialise report state
@@ -558,8 +564,10 @@ if candidates:
         # Show the cropped image Claude saw
         crop = st.session_state.get("crop_bytes")
         if crop:
-            with st.expander(" View image region sent to Claude"):
+            with st.expander(" View raw Bedrock payload & image crop"):
                 st.image(crop, caption="Cropped T1 (Post-Disturbance) dispatched to Bedrock")
+                st.markdown(f"**Model ID:** `{report.model_used}`  |  **Region:** `{report.region_used}`")
+                st.code(report.raw_json, language="json")
 
         # Optional S3 upload button
         if crop:
@@ -628,7 +636,7 @@ if candidates:
         bounds=[[min_lat, min_lon], [max_lat, max_lon]],
         opacity=1.0,
         transparent=True,
-        name=" FMDA Baseline Land Use (Cadastral Survey)",
+        name=" FMDA Baseline Land Use (Mock/Cached)",
         overlay=True,
         control=True,
         show=False,
@@ -682,7 +690,7 @@ if candidates:
                             unsafe_allow_html=True
                         )
             else:
-                st.caption("Official FMDA Land Use legend service unavailable.")
+                st.caption("Mock FMDA Land Use legend unavailable.")
 
         with tab2:
             mp_items = fetch_official_legend("FMDA_MasterPlan2031")
