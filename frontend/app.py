@@ -84,6 +84,7 @@ st.markdown(
         margin: 2px;
     }
     .chip-candidate  { background:#fff3cd; color:#856404; }
+    .chip-watchlist  { background:#cce5ff; color:#004085; }
     .chip-suppressed { background:#e2e3e5; color:#495057; }
     .chip-flagged    { background:#f8d7da; color:#842029; }
     .chip-ok         { background:#d1e7dd; color:#0a3622; }
@@ -271,9 +272,15 @@ for c in clusters:
     lu_ha[lu] = round(lu_ha.get(lu, 0.0) + c["pixel_count"] * 0.01, 3)
 
 if lu_ha:
-    lu_df = pd.DataFrame({"Land-use class": list(lu_ha.keys()), "Area (ha)": list(lu_ha.values())})
-    lu_df = lu_df.set_index("Land-use class").sort_values("Area (ha)", ascending=False)
-    st.bar_chart(lu_df)
+    import altair as alt
+    lu_df = pd.DataFrame({"Land Use": list(lu_ha.keys()), "Area (ha)": list(lu_ha.values())})
+    chart = alt.Chart(lu_df).mark_bar().encode(
+        x=alt.X("Area (ha):Q", title="Area (ha)"),
+        y=alt.Y("Land Use:N", sort="-x", title="", axis=alt.Axis(labelLimit=300)),
+        color=alt.value("#4c78a8"),
+        tooltip=["Land Use", "Area (ha)"]
+    ).properties(height=350).configure_axis(labelFontSize=12, titleFontSize=14)
+    st.altair_chart(chart, use_container_width=True)
 
 # 4 — NDVI timeseries for best cluster (highest priority)
 st.markdown("### NDVI Timeseries — Top Cluster (12 months)")
@@ -304,9 +311,15 @@ if clusters:
             ts = []
 
     if ts:
-        ts_df = pd.DataFrame(ts).set_index("date")
-        st.line_chart(ts_df, y="ndvi")
-        st.caption(f"Cluster {top_cluster['id']} (Lat: {top_cluster['lat']}, Lon: {top_cluster['lon']}) — Harvest dips then regrows; sustained low NDVI is consistent with clearing. Supporting evidence, not proof.")
+        import altair as alt
+        ts_df = pd.DataFrame(ts)
+        ts_chart = alt.Chart(ts_df).mark_line(point=True).encode(
+            x=alt.X("date:T", title="Acquisition Date"),
+            y=alt.Y("ndvi:Q", title="NDVI (10m Resolution)"),
+            tooltip=["date:T", "ndvi:Q"]
+        ).properties(height=300).configure_axis(labelFontSize=12, titleFontSize=14)
+        st.altair_chart(ts_chart, use_container_width=True)
+        st.caption(f"Cluster {top_cluster['id']} (Lat: {top_cluster['lat']}, Lon: {top_cluster['lon']}) — Harvest dips then regrows; sustained low NDVI is consistent with clearing. *Note: If NDVI strongly recovers later in the year, the initial drop was likely a seasonal harvest.*")
     else:
         st.info("Timeseries unavailable (STAC not reachable or no clear scenes found).")
 
@@ -357,7 +370,8 @@ else:
     n_supp = sum(1 for c in clusters if c["status"] == "SUPPRESSED")
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Clusters", len(clusters))
-    m2.metric("CANDIDATE (→ AI)", n_cand)
+    n_watch = sum(1 for c in clusters if c["status"] == "WATCHLIST")
+    m2.metric("WATCHLIST / CANDIDATE", n_cand + n_watch)
     m3.metric("SUPPRESSED (artifact)", n_supp)
 
 # ---------------------------------------------------------------------------
@@ -366,18 +380,19 @@ else:
 st.markdown("---")
 st.markdown("## Environmental Impact & UHI Risk Summary")
 
-total_footprint_ha = sum(c["pixel_count"] for c in clusters) * 0.01
-at_risk_ha = sum(c["pixel_count"] for c in clusters if any(k in c.get("dominant_class", "").lower() for k in ["agri", "forest", "crop"])) * 0.01
+total_footprint_ha = ((bbox[2] - bbox[0]) * 111) * ((bbox[3] - bbox[1]) * 111) * 100
+at_risk_ha = sum(c["pixel_count"] for c in clusters if c["status"] in ("CANDIDATE", "WATCHLIST")) * 0.01
 water_prox_count = sum(1 for c in clusters if c.get("near_water"))
 
 i1, i2, i3 = st.columns(3)
-i1.metric("Total Footprint Monitored", f"{total_footprint_ha:.2f} ha")
-i2.metric("Thermal Buffer Zone Lost (ha)", f"{at_risk_ha:.2f} ha")
+i1.metric("Total Area Scanned (ha)", f"{total_footprint_ha:,.0f} ha")
+at_risk_label = f"{at_risk_ha:.2f} ha" if at_risk_ha > 0 else "0 ha (None Flagged)"
+i2.metric("Vegetation-change area flagged (est. ha)", at_risk_label)
 i3.metric("Critical Waterbody Proximity", f"{water_prox_count} Clusters")
 
 st.info("🌱 *Cleared zones identified above are prime candidates for immediate government reclamation and plantation drives to mitigate localized UHI effects.*")
 
-candidates = [c for c in clusters if c["status"] == "CANDIDATE"]
+candidates = [c for c in clusters if c["status"] in ("CANDIDATE", "WATCHLIST")]
 
 if candidates:
     st.markdown("---")
@@ -395,7 +410,7 @@ if candidates:
             "Baseline Land Use (FMDA survey)": c.get("dominant_class", "Agriculture Cropland"),
             "Near Waterbody (<100m)": " YES" if c.get("near_water") else "No",
             "NDVI Drop (Δ)": f"{c['ndvi_drop_mean']:.4f}",
-            "Footprint (Pixels)": c["pixel_count"],
+            "Area (est. ha)": f"{c['pixel_count'] * 0.01:.2f}",
             "Fill Ratio": f"{c['fill_ratio']:.4f}",
             "Coordinates": f"{c['lat']}°N, {c['lon']}°E",
         }
@@ -627,7 +642,7 @@ if candidates:
             f"<b>Baseline Land Use (FMDA):</b> {dominant_lu}<br>"
             f"<b>Near Water:</b> {' Yes (<100m)' if near_water_flag else 'No'}<br>"
             f"<b>NDVI Δ:</b> {ndvi_drop:.4f}<br>"
-            f"<b>Pixels:</b> {pixel_count}<br>"
+            f"<b>Area:</b> ~{pixel_count * 0.01:.2f} est. ha<br>"
             f"<b>Fill Ratio:</b> {selected_cluster['fill_ratio']}<br>"
             f"<b>Status:</b> {selected_cluster['status']}",
             max_width=260,
@@ -687,9 +702,11 @@ if candidates:
 
 else:
     st.markdown("---")
+    n_supp = sum(1 for c in clusters if c["status"] == "SUPPRESSED")
+    n_bel = sum(1 for c in clusters if c["status"] == "BELOW_THRESHOLD")
     st.info(
-        " No CANDIDATE clusters found. All detected anomalies were classified "
-        "as sensor artefacts and suppressed. No AI dispatch required."
+        f" No CANDIDATE or WATCHLIST clusters found.\\n\\n"
+        f"**Breakdown:** {n_supp} suppressed as sensor artifacts, {n_bel} seasonal/below threshold."
     )
 
 
