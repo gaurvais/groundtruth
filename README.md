@@ -218,9 +218,9 @@ This is the project's anchor ground-truth validation. A real, known clearing eve
 
 ## 🚧 Limitations & Guardrails
 
-### Known Limitations
+### Known Limitations & Roadmap
 - **Resolution Floor:** Sentinel-2 10m resolution; reliable minimum detection ~0.5–1 ha. Sub-0.5 ha clearings may be missed.
-- **Monsoon Blindspot:** Indian monsoon (July–September) cloud cover limits optical satellite availability. Pipeline uses best-available valid-fraction scene with transparent fallback.
+- **Monsoon Blindspot & Sentinel-1 SAR Roadmap:** Indian monsoon (July–September) cloud cover limits optical satellite availability. Integrating Sentinel-1 Synthetic Aperture Radar (SAR) is on our immediate roadmap, providing all-weather, cloud-penetrating capabilities and turning the monsoon-season optical blindspot into a 365-day enforcement net.
 - **Terrain Shadows:** Aravalli ridge shadow angles in winter can trigger marginal NDVI drops. Temporal persistence tracking (planned) will filter these.
 - **Seasonal Agriculture:** Kharif harvest mimics plot carving. Claude is explicitly instructed to weigh seasonal patterns; confidence scores reflect this uncertainty.
 

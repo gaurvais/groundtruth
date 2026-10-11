@@ -574,6 +574,14 @@ if candidates:
     styled_queue = df_queue.style.apply(_style_queue, axis=1)
     st.dataframe(styled_queue, width="stretch", hide_index=True)
 
+    csv_queue = df_queue.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Export Ranked Inspection Queue (CSV)",
+        data=csv_queue,
+        file_name="ranked_inspection_queue.csv",
+        mime="text/csv",
+    )
+
     st.markdown("---")
     st.markdown("## AI Verification — AWS Bedrock / Claude")
 
