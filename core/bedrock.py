@@ -171,7 +171,13 @@ def _crop_visual_image(
 
 _VERIFICATION_PROMPT = """\
 You are an expert remote-sensing analyst assisting a District Town Planner \
-(DTP) in identifying unauthorized land development on agricultural land.
+(DTP) in screening suspected land development and plot carving on agricultural land.
+
+LEGAL & COMPLIANCE DIRECTIVES:
+- Do NOT make definitive legal findings. You must NEVER use the words "illegal" or "unauthorized" in your reasoning or output.
+- Explicitly describe any detected disturbance using the phrasing: "suspected clearing, unverified, licence status not checked".
+- Any ecological reclamation or plantation recommendations must be explicitly labeled as "indicative".
+- Baseline land use is an administrative survey (FMDA survey), not statutory master plan zoning.
 
 The image shows a cropped region of a Sentinel-2 true-colour composite \
 from {t1_date}, centred at approximately {lat:.5f}°N, {lon:.5f}°E.
@@ -183,30 +189,24 @@ Official Baseline Context (FMDA Survey):
 - Baseline Land Use (FMDA survey): {dominant_class}
 - Near Water: {near_water}
 
+Confidence Scoring Guide: Synthesize both the visual patterns AND the corroborating GIS facts. If linear tracks, grid patterns, or irregular clearing are present on baseline cropland with a severe NDVI drop, assign a calibrated confidence score reflecting the multi-factor evidence (e.g., 65% to 85%), recognizing that 10m Sentinel-2 imagery acts as a low-resolution tripwire for physical field review.
 
-Confidence Scoring Guide: Synthesize both the visual patterns AND the corroborating GIS facts. If linear tracks, grid patterns, or irregular clearing are present on baseline cropland with a severe NDVI drop, assign a calibrated confidence score reflecting the multi-factor evidence (e.g., 65% to 85%), recognizing that 10m Sentinel-2 imagery acts as a low-resolution tripwire for field review.
-
-
-Environmental Context: Explicitly note in your reasoning that the unauthorized clearing of this baseline agricultural land removes natural cooling, increases future light pollution, and creates a severe Urban Heat Island (UHI) risk if not reclaimed via plantation drives.
+Environmental Context: Note in your reasoning that suspected clearing of this baseline agricultural land removes natural cooling buffers, increases future light pollution, and elevates localized Urban Heat Island (UHI) risk; flag any potential plantation or reclamation measures strictly as indicative suggestions for physical field review.
 
 Your task:
 1. The parcel has a baseline classification of Agriculture Cropland per the FMDA survey. \
 Inspect for active ground clearance, dirt road corridors, and rectangular soil compaction adjacent to settlements. \
 Flag as FLAG_FOR_REVIEW if deliberate anthropogenic clearing or road carving is evident on agricultural land, \
 even if formal concrete foundations are not yet visible.
-2. Consider the previous agricultural/vegetative baseline when evaluating \
-disturbance legitimacy. Baseline land use is an administrative survey, not statutory master plan zoning. Do not make definitive legal conclusions. Focus on visible physical ground alterations: soil excavation, vegetation loss, and nascent road corridors. Clearings on designated agricultural cropland or \
-within waterbody buffer zones (<100m) represent severe regulatory violations.
-3. Distinguish these from natural causes (seasonal dry-out, harvested \
-fields) or sensor artefacts.
-4. Return ONLY a JSON object — no preamble, no markdown — matching this \
-exact schema:
+2. Focus on visible physical ground alterations: soil excavation, vegetation loss, and nascent road corridors. Clearings on designated agricultural cropland or within waterbody buffer zones (<100m) warrant prioritized physical inspection.
+3. Distinguish these from natural causes (seasonal dry-out, harvested fields) or sensor artefacts.
+4. Return ONLY a JSON object — no preamble, no markdown — matching this exact schema:
 {{
   "parcel_id": "{parcel_id}",
   "confidence": <float 0–1>,
-  "violation_type": "<e.g. Suspected Land Clearing (Unverified) | Agricultural Burn | Natural Drying | Sensor Artifact>",
+  "violation_type": "<e.g. Suspected Land Clearing (Unverified, licence status not checked) | Agricultural Burn | Natural Drying | Sensor Artifact>",
   "action": "<FLAG_FOR_REVIEW | SUPPRESS_NO_ACTION>",
-  "reasoning": "<two or three sentences>"
+  "reasoning": "<two or three sentences using compliance phrasing: 'suspected clearing, unverified, licence status not checked', labeling any reclamation proposals as indicative, and strictly avoiding the words 'illegal' or 'unauthorized'>"
 }}
 
 Be conservative: flag only if you see unambiguous anthropogenic patterns.
@@ -302,12 +302,23 @@ def call_bedrock_verification(
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "Unknown")
             error_msg = e.response.get("Error", {}).get("Message", str(e))
-            log.warning(f"Bedrock ClientError ({error_code}): {error_msg}")
+            http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+            log.warning(f"Bedrock ClientError ({error_code}, HTTP {http_status}): {error_msg}")
             
-            if error_code in ["ThrottlingException", "ModelTimeoutException"]:
-                if attempt < max_retries - 1:
-                    time.sleep(base_delay * (2 ** attempt))
-                    continue
+            # Fail fast on auth and input validation errors
+            if error_code in ("AccessDeniedException", "ValidationException"):
+                raise RuntimeError(f"Bedrock Client Error [{error_code}]: {error_msg}")
+            
+            # Only retry throttling or 5xx server errors
+            is_throttling = error_code in ("ThrottlingException", "ModelTimeoutException")
+            is_5xx = (http_status >= 500) or (error_code in ("InternalServerException", "ServiceUnavailableException"))
+            
+            if (is_throttling or is_5xx) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                log.info(f"Retrying Bedrock call (attempt {attempt + 1}/{max_retries}) in {delay}s...")
+                time.sleep(delay)
+                continue
+                
             raise RuntimeError(f"Bedrock API Error [{error_code}]: {error_msg}")
             
         except json.JSONDecodeError as e:

@@ -4,7 +4,7 @@
 
 ![GroundTruth Header](Data/background_image.jpg)
 
-**GroundTruth** is an automated satellite surveillance dashboard built for the District Town Planner (DTP) of Faridabad. It acts as an early-warning radar to detect unauthorized colonies and illegal plot carving on agricultural lands. 
+**GroundTruth** is an automated satellite surveillance dashboard built for the District Town Planner (DTP) of Faridabad. It acts as an early-warning radar to detect suspected unpermitted colonies and plot carving on agricultural lands. 
 
 By identifying ~1 ha demonstrated vegetation loss, the pipeline flags the destruction of critical thermal buffers—with the intended goal of enabling government enforcement before permanent concrete structures are laid. It fuses AWS Open Data, morphological algorithms, and Multimodal Generative AI (Amazon Bedrock) into an actionable GovTech decision-support tool.
 
@@ -26,9 +26,9 @@ By identifying ~1 ha demonstrated vegetation loss, the pipeline flags the destru
 
 ## 🌍 Why this exists
 
-For over a decade, Faridabad has struggled with the unchecked spread of unauthorized colonies. "Plot carving" typically begins by clearing agricultural land and laying rudimentary dirt tracks, destroying the surrounding ecosystem before any concrete is poured. 
+For over a decade, Faridabad has struggled with the unchecked spread of unpermitted settlements. "Plot carving" typically begins by clearing agricultural land and laying rudimentary dirt tracks, destroying the surrounding ecosystem before any concrete is poured. 
 
-*(Insert your ground photo here: `![Ground Photo](path/to/photo.jpg)`)*
+<!-- TODO: Insert ground photo here -->
 
 This unchecked concrete expansion destroys natural thermal buffers and creates massive **Urban Heat Islands (UHIs)**. While the pipeline focuses on tracking vegetation loss, halting this expansion is also a critical defense against rising localized temperatures and eventual light pollution (protecting the night sky).
 
@@ -36,7 +36,7 @@ This unchecked concrete expansion destroys natural thermal buffers and creates m
 
 ## 🏆 Hackathon Track
 **Heat and Water**
-This pipeline supports UHI mitigation by empowering government forces (like the DTP) to reclaim and mandate plantation drives on illegally cleared agricultural land.
+This pipeline supports UHI mitigation by empowering government authorities (like the DTP) to plan reclamation and mandate plantation drives on suspected cleared agricultural land.
 
 ---
 
@@ -44,9 +44,9 @@ This pipeline supports UHI mitigation by empowering government forces (like the 
 
 1. **Cloud-Native STAC Ingestion:** Performs windowed reads of 10m-resolution Sentinel-2 Cloud-Optimized GeoTIFFs (COGs) directly from the AWS Open Data Registry (S3) via the STAC API, bypassing massive local downloads.
 2. **Morphological Pruning:** Uses `scipy.ndimage` to compute NDVI drops, extract contiguous clusters, and apply geometric fill-ratios (>= 0.65) to automatically suppress sensor swath-edge artifacts.
-3. **FMDA GIS Cross-Referencing:** Validates anomalies against the Faridabad Master Plan 2031 (Live State GIS Server) and Baseline Land Use (Mock/Cached).
+3. **FMDA GIS Cross-Referencing:** Validates anomalies against the Faridabad Master Plan 2031 (Live State GIS Server) and Baseline Land Use (FMDA survey (cached)).
 4. **Visual Triage Assistant (Amazon Bedrock):** Dispatches high-probability crops to Amazon Bedrock (Claude). The LLM acts as a triage assistant to recommend whether a field inspector is required.
-5. **Detection Floor:** Successfully demonstrated on ~1 ha demonstrated clearing (approx. 1 ha baseline).
+5. **Detection Floor:** Successfully demonstrated on ~1 ha clearing baseline.
 
 ---
 

@@ -129,7 +129,7 @@ st.markdown(
 # Header
 # ---------------------------------------------------------------------------
 st.title("GroundTruth — DTP Enforcement Radar")
-st.markdown("Faridabad District | Unauthorized Colony & Illegal Plot Carving Detection | Sentinel-2 NDVI Δ Analysis")
+st.markdown("Faridabad District | Suspected Plot Carving Radar | Sentinel-2 NDVI Δ Analysis")
 
 # ---------------------------------------------------------------------------
 # Sidebar & State
@@ -281,6 +281,7 @@ if lu_ha:
         tooltip=["Land Use", "Area (ha)"]
     ).properties(height=350).configure_axis(labelFontSize=12, titleFontSize=14)
     st.altair_chart(chart, width='stretch')
+    st.caption("Illustrative, FMDA survey (cached) baseline.")
 
 # 4 — NDVI timeseries for best cluster (highest priority)
 st.markdown("### NDVI Timeseries — Top Cluster (12 months)")
@@ -386,12 +387,16 @@ try:
     
     cand_ha = sum(c["pixel_count"] for c in clusters if c["status"] == "CANDIDATE") * 0.01
     watch_ha = sum(c["pixel_count"] for c in clusters if c["status"] == "WATCHLIST") * 0.01
+    total_veg_loss_ha = cand_ha + watch_ha
     water_prox_count = sum(1 for c in clusters if c.get("near_water"))
 
-    i1, i2, i3 = st.columns(3)
+    i1, i2, i3, i4 = st.columns(4)
     i1.metric("Area scanned (est. ha)", f"{total_footprint_ha:,.0f} ha")
-    i2.metric("Candidate (persistent)", f"{cand_ha:.2f} est. ha")
-    i3.metric("Watchlist (new, unconfirmed)", f"{watch_ha:.2f} est. ha")
+    with i2:
+        st.metric("Vegetation loss (ha), thermal-buffer proxy", f"{total_veg_loss_ha:.2f} est. ha")
+        st.caption("No temperature measured.")
+    i3.metric("Candidate", f"{cand_ha:.2f} est. ha")
+    i4.metric("Watchlist", f"{watch_ha:.2f} est. ha")
 
     st.caption("**Status Guide:** SUPPRESSED (geometric artifact), BELOW_THRESHOLD (seasonal/crop), WATCHLIST (new change, not yet confirmed), CANDIDATE (persistent). *Note: Persistence tracking is a planned next step. Until implemented, anomalies will remain WATCHLIST.*")
     
@@ -536,7 +541,7 @@ if candidates:
                 </div>
                 <table style="width:100%; border-collapse:collapse; color:#1f2937 !important;">
                 <tr>
-                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; width:170px;">Violation Type</td>
+                    <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; width:170px;">Suspected Activity</td>
                     <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{report.violation_type}</td>
                 </tr>
                 <tr>
@@ -636,7 +641,7 @@ if candidates:
         bounds=[[min_lat, min_lon], [max_lat, max_lon]],
         opacity=1.0,
         transparent=True,
-        name=" FMDA Baseline Land Use (Mock/Cached)",
+        name=" FMDA Baseline Land Use (FMDA survey (cached))",
         overlay=True,
         control=True,
         show=False,
@@ -690,7 +695,7 @@ if candidates:
                             unsafe_allow_html=True
                         )
             else:
-                st.caption("Mock FMDA Land Use legend unavailable.")
+                st.caption("FMDA survey (cached) Land Use legend unavailable.")
 
         with tab2:
             mp_items = fetch_official_legend("FMDA_MasterPlan2031")
