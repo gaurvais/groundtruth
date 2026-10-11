@@ -753,25 +753,27 @@ if candidates:
         name=" Satellite Basemap (Esri)",
     ).add_to(fmap)
 
-    min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
+    offset = 0.011
+    min_lon, max_lon = lon - offset, lon + offset
+    min_lat, max_lat = lat - offset, lat + offset
 
     # 1. FMDA Master Plan 2031 Overlay (Server-side alpha masked)
     mp_path = fetch_transparent_master_plan(bbox=(min_lon, min_lat, max_lon, max_lat))
-    import base64
-    with open(mp_path, "rb") as image_file:
-        mp_b64 = base64.b64encode(image_file.read()).decode("utf-8")
-    mp_data_uri = f"data:image/png;base64,{mp_b64}"
+    if mp_path and mp_path.exists():
+        with open(mp_path, "rb") as image_file:
+            mp_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+        mp_data_uri = f"data:image/png;base64,{mp_b64}"
 
-    folium.raster_layers.ImageOverlay(
-        image=mp_data_uri,
-        bounds=[[min_lat, min_lon], [max_lat, max_lon]],
-        opacity=0.75,
-        transparent=True,
-        name=" FMDA Master Plan 2031 (Zoning)",
-        overlay=True,
-        control=True,
-        show=False,
-    ).add_to(fmap)
+        folium.raster_layers.ImageOverlay(
+            image=mp_data_uri,
+            bounds=[[min_lat, min_lon], [max_lat, max_lon]],
+            opacity=0.75,
+            transparent=True,
+            name=" FMDA Master Plan 2031 (Zoning)",
+            overlay=True,
+            control=True,
+            show=False,
+        ).add_to(fmap)
 
     # 2. FMDA Land Use Overlay (Official Patterns)
     lu_export_url = f"https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_Land_Use/MapServer/export?bbox={min_lon},{min_lat},{max_lon},{max_lat}&bboxSR=4326&imageSR=4326&size=1400,1400&layers=show:1&format=png32&transparent=true&f=image"

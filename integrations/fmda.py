@@ -25,9 +25,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 log = logging.getLogger(__name__)
 
 
-LAND_USE_CACHE_FILE: Path = DATA_DIR / "land_use.geojson"
-
-
 def fetch_and_cache_land_use(
     bbox: tuple[float, float, float, float] | None = None,
     output_path: Path | None = None,
@@ -36,13 +33,13 @@ def fetch_and_cache_land_use(
     Fetch vector land-use polygons covering scan bbox from the official FMDA API.
     Caches per bbox hash in Data/cache/land_use_<hash>.geojson.
     """
-    if bbox is not None:
-        min_lon, min_lat, max_lon, max_lat = bbox
-        bbox_hash = hashlib.md5(f"{min_lon:.4f}_{min_lat:.4f}_{max_lon:.4f}_{max_lat:.4f}".encode()).hexdigest()[:10]
-        target_path = output_path or (DATA_DIR / "cache" / f"land_use_{bbox_hash}.geojson")
-    else:
-        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
-        target_path = output_path or LAND_USE_CACHE_FILE
+    if bbox is None:
+        log.warning("fetch_and_cache_land_use called with bbox=None. Returning empty collection.")
+        return {"type": "FeatureCollection", "features": []}
+
+    min_lon, min_lat, max_lon, max_lat = bbox
+    bbox_hash = hashlib.md5(f"{min_lon:.4f}_{min_lat:.4f}_{max_lon:.4f}_{max_lat:.4f}".encode()).hexdigest()[:10]
+    target_path = output_path or (DATA_DIR / "cache" / f"land_use_{bbox_hash}.geojson")
 
     if target_path.exists():
         try:
@@ -77,14 +74,7 @@ def fetch_and_cache_land_use(
             log.info("Saved %d land-use features to %s", len(geojson_data["features"]), target_path)
             return geojson_data
     except Exception as exc:
-        log.warning("FMDA land-use query failed (%s). Checking fallback cache.", exc)
-
-    if LAND_USE_CACHE_FILE.exists():
-        try:
-            log.info("Falling back to bundled baseline land-use: %s", LAND_USE_CACHE_FILE)
-            return json.loads(LAND_USE_CACHE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        log.warning("FMDA land-use query failed (%s).", exc)
 
     return {"type": "FeatureCollection", "features": []}
 
@@ -92,42 +82,48 @@ def fetch_and_cache_land_use(
 def fetch_transparent_master_plan(
     bbox: tuple[float, float, float, float] | None = None,
     output_path: Path | None = None,
-) -> Path:
+) -> Path | None:
     """
     Fetch the Master Plan export image, apply a server-side alpha mask to turn 
     white background pixels transparent, and save locally.
     """
-    target_path = output_path or (DATA_DIR / "master_plan_transparent.png")
+    if bbox is None:
+        log.warning("fetch_transparent_master_plan called with bbox=None. Returning None.")
+        return None
+
+    min_lon, min_lat, max_lon, max_lat = bbox
+    bbox_hash = hashlib.md5(f"{min_lon:.4f}_{min_lat:.4f}_{max_lon:.4f}_{max_lat:.4f}".encode()).hexdigest()[:10]
+    target_path = output_path or (DATA_DIR / "cache" / f"master_plan_{bbox_hash}.png")
+
     if target_path.exists():
         log.info("Loading cached transparent master plan from %s", target_path)
         return target_path
-
-    if bbox is not None:
-        min_lon, min_lat, max_lon, max_lat = bbox
-    else:
-        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
 
     url = f"https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_MasterPlan2031/MapServer/export?bbox={min_lon},{min_lat},{max_lon},{max_lat}&bboxSR=4326&imageSR=4326&size=1400,1400&layers=show:0&format=png32&f=image"
     
     session = requests.Session()
     session.mount("https://", LegacyRenegotiationAdapter())
     
-    log.info("Fetching Master Plan image for alpha masking...")
-    resp = session.get(url, verify=False, timeout=30)
-    resp.raise_for_status()
-    
-    img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-    arr = np.array(img)
-    
-    # Soft alpha mask: keeps tinted fills while removing pure white/light paper background
-    min_rgb = np.min(arr[:, :, :3], axis=2)
-    arr[:, :, 3] = np.clip((255 - min_rgb) * 3.5, 0, 255).astype(np.uint8)
-    
-    transparent_img = Image.fromarray(arr)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    transparent_img.save(target_path, format="PNG")
-    
-    return target_path
+    try:
+        log.info("Fetching Master Plan image for alpha masking...")
+        resp = session.get(url, verify=False, timeout=30)
+        resp.raise_for_status()
+        
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        arr = np.array(img)
+        
+        # Soft alpha mask: keeps tinted fills while removing pure white/light paper background
+        min_rgb = np.min(arr[:, :, :3], axis=2)
+        arr[:, :, 3] = np.clip((255 - min_rgb) * 3.5, 0, 255).astype(np.uint8)
+        
+        transparent_img = Image.fromarray(arr)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        transparent_img.save(target_path, format="PNG")
+        
+        return target_path
+    except Exception as exc:
+        log.warning("Failed to fetch/process transparent master plan (%s). Returning None.", exc)
+        return None
 
 def enrich_clusters_with_land_use(
     clusters: list[dict],
