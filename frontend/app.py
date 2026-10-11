@@ -23,6 +23,13 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+import importlib
+import utils.config
+
+# Force reload if running Streamlit process has cached an older utils.config in sys.modules
+if not hasattr(utils.config, "REGIONS") or not hasattr(utils.config, "LAND_USE_COLORS"):
+    importlib.reload(utils.config)
+
 from utils.config import (
     list_available_inference_profiles,
     FILL_RATIO_ARTIFACT_THRESHOLD,
@@ -31,10 +38,61 @@ from utils.config import (
     LegacyRenegotiationAdapter,
     T1_VISUAL,
     USE_STAC,
-    REGIONS,
-    LAND_USE_COLORS,
-    get_land_use_color,
 )
+
+# Robust fallback to guarantee imports never fail during live server reloads
+REGIONS = getattr(
+    utils.config,
+    "REGIONS",
+    {
+        "Ballabgarh Agro Belt": (77.28, 28.22, 77.42, 28.34),
+        "Aravalli Ridge Corridor": (77.16, 28.28, 77.30, 28.46),
+        "Neharpar Urban Ext.": (77.32, 28.32, 77.44, 28.45),
+        "Entire Faridabad": (77.15, 28.20, 77.55, 28.52),
+    },
+)
+
+LAND_USE_COLORS = getattr(
+    utils.config,
+    "LAND_USE_COLORS",
+    {
+        "Agriculture Cropland": "#8BC34A",
+        "Forest Plantation": "#2E7D32",
+        "Forest": "#2E7D32",
+        "Built-up Urban Public Utilities": "#9E9E9E",
+        "Built-up Rural Household": "#B0BEC5",
+        "Built-up Rural Vegetation": "#81C784",
+        "Built-up": "#9E9E9E",
+        "Wasteland Scrub-Open": "#BCAAA4",
+        "Wasteland": "#BCAAA4",
+        "Waterbody Reservoir/ Tank": "#4FC3F7",
+        "Waterbody Canal": "#29B6F6",
+        "Waterbody Lake/Pond": "#0288D1",
+        "Waterbody": "#4FC3F7",
+        "Grazing Grassland": "#C5E1A5",
+        "Unknown": "#78909C",
+    },
+)
+
+def _default_get_land_use_color(cls_name: str) -> str:
+    if cls_name in LAND_USE_COLORS:
+        return LAND_USE_COLORS[cls_name]
+    cls_lower = str(cls_name).lower()
+    if "agri" in cls_lower or "crop" in cls_lower:
+        return "#8BC34A"
+    if "forest" in cls_lower or "tree" in cls_lower or "plantation" in cls_lower:
+        return "#2E7D32"
+    if "built" in cls_lower or "urban" in cls_lower or "settlement" in cls_lower:
+        return "#9E9E9E"
+    if "water" in cls_lower or "pond" in cls_lower or "lake" in cls_lower or "canal" in cls_lower:
+        return "#4FC3F7"
+    if "waste" in cls_lower or "scrub" in cls_lower:
+        return "#BCAAA4"
+    if "grass" in cls_lower or "grazing" in cls_lower:
+        return "#C5E1A5"
+    return "#78909C"
+
+get_land_use_color = getattr(utils.config, "get_land_use_color", _default_get_land_use_color)
 from core.detection import stac_compute_ndvi, extract_clusters, load_and_compute_ndvi
 from core.stac_ingestion import cluster_timeseries
 from integrations.fmda import enrich_clusters_with_land_use
