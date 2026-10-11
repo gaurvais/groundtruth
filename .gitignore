@@ -29,5 +29,4 @@ dist/
 Thumbs.db
 
 # Data caches
-Data/cache/
 Data/live_crops/
