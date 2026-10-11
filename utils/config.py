@@ -1,36 +1,15 @@
 from __future__ import annotations
-import datetime as dt
-import hashlib
-import io
-import json
+
 import logging
+import math
 import os
 import ssl
 from pathlib import Path
-from typing import Literal
 
 import boto3
-import numpy as np
-import rasterio
-from rasterio.transform import xy as rio_xy
-from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
-from rasterio.enums import Resampling
-from rasterio.warp import transform as warp_transform
-import requests
 import urllib3
-from requests.adapters import HTTPAdapter
-from shapely.geometry import shape, Point, box
-from PIL import Image
-from pydantic import BaseModel, field_validator
-from scipy import ndimage
 from dotenv import load_dotenv
-
-try:
-    from pystac_client import Client as STACClient
-    HAS_PYSTAC = True
-except ImportError:
-    HAS_PYSTAC = False
+from requests.adapters import HTTPAdapter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
@@ -57,7 +36,7 @@ class LegacyRenegotiationAdapter(HTTPAdapter):
 NDVI_THRESHOLD: float = 0.15          # Minimum delta-NDVI to flag a pixel
 FILL_RATIO_ARTIFACT_THRESHOLD: float = 0.65  # Rectangles this full → artifact
 MIN_CLUSTER_PIXELS: int = 50          # Ignore tiny specks < N pixels
-S3_BUCKET: str = os.getenv("GROUNDTRUTH_S3_BUCKET", "groundtruth-enforcement")
+S3_BUCKET: str | None = os.getenv("GROUNDTRUTH_S3_BUCKET")
 AWS_REGION: str = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-southeast-2"
 
 FMDA_LAND_USE_QUERY_URL: str = (
@@ -97,10 +76,6 @@ REGIONS: dict[str, tuple[float, float, float, float]] = {
     "Neharpar Urban Ext.": (77.32, 28.32, 77.44, 28.45),
     "Entire Faridabad": (77.15, 28.20, 77.55, 28.52),
 }
-
-# Aliases for backwards compatibility
-REGIONS["Neharpar Urban Extension"] = REGIONS["Neharpar Urban Ext."]
-REGIONS["Entire Faridabad District"] = REGIONS["Entire Faridabad"]
 
 # ---------------------------------------------------------------------------
 # Land Use Color Scale (Altair charts & UI legend swatches)
@@ -173,21 +148,19 @@ def list_available_inference_profiles(region: str | None = None) -> list[dict]:
 _HERE = Path(__file__).parent
 DATA_DIR = _HERE.parent / "Data"
 
-# Files may have doubled extensions from the upload; resolve robustly
-def _find_data_file(stem: str) -> Path:
-    """Return the actual path of a data file, handling doubled extensions."""
+def _find_data_file(stem: str) -> Path | None:
+    """Return the actual path of a data file if found, otherwise None (lazy resolution)."""
+    if not DATA_DIR.exists():
+        return None
     candidates = list(DATA_DIR.glob(f"{stem}*"))
     if not candidates:
-        raise FileNotFoundError(
-            f"Cannot find '{stem}' in {DATA_DIR}. "
-            f"Available: {[p.name for p in DATA_DIR.iterdir()]}"
-        )
-    # Prefer exact stem match, then fallback to first candidate
+        return None
     for c in candidates:
         if c.name.startswith(stem):
             return c
     return candidates[0]
 
+# Lazy resolution module variables (None if files are absent, does not crash import)
 T0_B04 = _find_data_file("t0_b04")
 T0_B08 = _find_data_file("t0_b08")
 T1_B04 = _find_data_file("t1_b04")
@@ -198,13 +171,39 @@ T1_VISUAL = _find_data_file("t1_visual")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-
-
-
-import math
-def calculate_scanned_ha(bbox):
+def calculate_scanned_ha(bbox: tuple[float, float, float, float]) -> float:
+    """Haversine estimate of bbox area in hectares."""
     lon_min, lat_min, lon_max, lat_max = bbox
     mean_lat = (lat_min + lat_max) / 2.0
     width_km = (lon_max - lon_min) * 111.32 * math.cos(math.radians(mean_lat))
     height_km = (lat_max - lat_min) * 110.57
-    return width_km * height_km * 100
+    return width_km * height_km * 100.0
+
+
+def calculate_raster_scanned_ha(transform, shape: tuple[int, int], crs=None) -> float:
+    """Compute the actual scanned area in hectares from raster transform and shape."""
+    h, w = shape
+    # Corner coordinates in raster CRS: top-left (0,0) and bottom-right (w,h)
+    x0, y0 = transform * (0, 0)
+    x1, y1 = transform * (w, h)
+    
+    is_projected = False
+    if crs is not None:
+        try:
+            import pyproj
+            proj_crs = pyproj.CRS.from_user_input(crs)
+            is_projected = proj_crs.is_projected
+        except Exception:
+            if abs(x0) > 360 or abs(y0) > 360:
+                is_projected = True
+    elif abs(x0) > 360 or abs(y0) > 360:
+        is_projected = True
+
+    if is_projected:
+        area_m2 = abs(x1 - x0) * abs(y1 - y0)
+        return float(area_m2 / 10000.0)
+
+    # If coordinates are in degrees (EPSG:4326)
+    lon_min, lon_max = min(x0, x1), max(x0, x1)
+    lat_min, lat_max = min(y0, y1), max(y0, y1)
+    return calculate_scanned_ha((lon_min, lat_min, lon_max, lat_max))

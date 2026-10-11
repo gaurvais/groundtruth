@@ -6,7 +6,7 @@ Path("Data/cache").mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(Path.cwd()))
 from core.detection import run_detection
-from frontend.app import REGIONS
+from utils.config import REGIONS
 
 print("Pre-warming STAC cache for all preset regions...")
 for region_name, bbox in REGIONS.items():

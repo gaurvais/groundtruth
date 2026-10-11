@@ -4,103 +4,48 @@ app.py — GroundTruth Enforcement Dashboard
 Streamlit front-end only.  All computation is delegated to pipeline.py.
 """
 
-import io
-import traceback
 import base64
+import html
+import os
+import sys
+import traceback
+from pathlib import Path
 
 import folium
-import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
-from PIL import Image
 from streamlit_folium import st_folium
 
-import sys
-from pathlib import Path
-# Add project root to sys.path so modules (utils, core, integrations) can be resolved
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-import importlib
-import utils.config
-
-# Force reload if running Streamlit process has cached an older utils.config in sys.modules
-if not hasattr(utils.config, "REGIONS") or not hasattr(utils.config, "LAND_USE_COLORS"):
-    importlib.reload(utils.config)
-
-from utils.config import (
-    list_available_inference_profiles,
-    FILL_RATIO_ARTIFACT_THRESHOLD,
-    BEDROCK_MODEL_ID,
-    AWS_REGION,
-    LegacyRenegotiationAdapter,
-    T1_VISUAL,
-    USE_STAC,
+from core.bedrock import (
+    ReviewReport,
+    _crop_stac_visual,
+    _crop_visual_image,
+    call_bedrock_verification,
+    upload_to_s3,
 )
-
-# Robust fallback to guarantee imports never fail during live server reloads
-REGIONS = getattr(
-    utils.config,
-    "REGIONS",
-    {
-        "Ballabgarh Agro Belt": (77.28, 28.22, 77.42, 28.34),
-        "Aravalli Ridge Corridor": (77.16, 28.28, 77.30, 28.46),
-        "Neharpar Urban Ext.": (77.32, 28.32, 77.44, 28.45),
-        "Entire Faridabad": (77.15, 28.20, 77.55, 28.52),
-    },
-)
-
-LAND_USE_COLORS = getattr(
-    utils.config,
-    "LAND_USE_COLORS",
-    {
-        "Agriculture Cropland": "#8BC34A",
-        "Forest Plantation": "#2E7D32",
-        "Forest": "#2E7D32",
-        "Built-up Urban Public Utilities": "#9E9E9E",
-        "Built-up Rural Household": "#B0BEC5",
-        "Built-up Rural Vegetation": "#81C784",
-        "Built-up": "#9E9E9E",
-        "Wasteland Scrub-Open": "#BCAAA4",
-        "Wasteland": "#BCAAA4",
-        "Waterbody Reservoir/ Tank": "#4FC3F7",
-        "Waterbody Canal": "#29B6F6",
-        "Waterbody Lake/Pond": "#0288D1",
-        "Waterbody": "#4FC3F7",
-        "Grazing Grassland": "#C5E1A5",
-        "Unknown": "#78909C",
-    },
-)
-
-def _default_get_land_use_color(cls_name: str) -> str:
-    if cls_name in LAND_USE_COLORS:
-        return LAND_USE_COLORS[cls_name]
-    cls_lower = str(cls_name).lower()
-    if "agri" in cls_lower or "crop" in cls_lower:
-        return "#8BC34A"
-    if "forest" in cls_lower or "tree" in cls_lower or "plantation" in cls_lower:
-        return "#2E7D32"
-    if "built" in cls_lower or "urban" in cls_lower or "settlement" in cls_lower:
-        return "#9E9E9E"
-    if "water" in cls_lower or "pond" in cls_lower or "lake" in cls_lower or "canal" in cls_lower:
-        return "#4FC3F7"
-    if "waste" in cls_lower or "scrub" in cls_lower:
-        return "#BCAAA4"
-    if "grass" in cls_lower or "grazing" in cls_lower:
-        return "#C5E1A5"
-    return "#78909C"
-
-get_land_use_color = getattr(utils.config, "get_land_use_color", _default_get_land_use_color)
-from core.detection import stac_compute_ndvi, extract_clusters, load_and_compute_ndvi
+from core.detection import extract_clusters, load_and_compute_ndvi, stac_compute_ndvi
 from core.stac_ingestion import cluster_timeseries
-from integrations.fmda import enrich_clusters_with_land_use
+from integrations.fmda import (
+    enrich_clusters_with_land_use,
+    fetch_official_legend,
+    fetch_transparent_master_plan,
+)
+from utils.config import (
+    AWS_REGION,
+    BEDROCK_MODEL_ID,
+    FILL_RATIO_ARTIFACT_THRESHOLD,
+    LAND_USE_COLORS,
+    REGIONS,
+    T1_VISUAL,
+    calculate_raster_scanned_ha,
+    calculate_scanned_ha,
+    get_land_use_color,
+)
 
-from core.bedrock import call_bedrock_verification, upload_to_s3, _crop_visual_image, _crop_stac_visual, InterdictionReport
-from integrations.fmda import fetch_transparent_master_plan, fetch_official_legend
-
-import base64
 
 def set_background(image_path: str):
     try:
@@ -258,6 +203,7 @@ last_scanned_timeframe = st.session_state.get("last_scanned_timeframe")
 
 if (region_name != last_scanned_region) or (timeframe_name != last_scanned_timeframe):
     st.session_state.scan_run = False
+    st.session_state["use_bundled_sample"] = False
 
 if run_scan and can_scan:
     st.session_state.scan_run = True
@@ -265,6 +211,7 @@ if run_scan and can_scan:
     st.session_state.last_scanned_timeframe = timeframe_name
     st.session_state.bbox = REGIONS[region_name]
     st.session_state.force_dates = TIMEFRAME_DETAILS[timeframe_name]["dates"]
+    st.session_state["use_bundled_sample"] = False
     # Clear any previous bedrock report from earlier runs
     st.session_state["bedrock_report"] = None
     st.session_state["bedrock_error"] = None
@@ -294,13 +241,14 @@ if not st.session_state.get("scan_run", False):
 # Run the detection pipeline (cached)
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def cached_detection(bbox, force_dates):
+def cached_detection(bbox, force_dates, use_sample: bool = False):
     from scipy import ndimage as _ndi
-    try:
-        ndvi_data_res = stac_compute_ndvi(bbox_lonlat=bbox, force_dates=force_dates)
-    except Exception as exc:
-        print(f"STAC failed: {exc}")
+    if use_sample:
         ndvi_data_res = load_and_compute_ndvi()
+        ndvi_data_res["is_sample"] = True
+    else:
+        ndvi_data_res = stac_compute_ndvi(bbox_lonlat=bbox, force_dates=force_dates)
+        ndvi_data_res["is_sample"] = False
 
     # --- Funnel counts (before any filter) ---
     _, n_raw = _ndi.label(ndvi_data_res["anomaly_mask"])
@@ -318,28 +266,24 @@ def cached_detection(bbox, force_dates):
         "suppress_no_action":    0,
     }
 
-    return (
-        {k: (v.tolist() if isinstance(v, np.ndarray) else v)
-         for k, v in ndvi_data_res.items()},
-        c,
-        funnel,
-    )
+    return ndvi_data_res, c, funnel
 
+use_sample_flag = st.session_state.get("use_bundled_sample", False)
 try:
     with st.spinner("Querying AWS Earth Search STAC & Processing NDVI..."):
-        ndvi_data_raw, clusters, funnel = cached_detection(
-            st.session_state.bbox, st.session_state.force_dates
+        ndvi_data, clusters, funnel = cached_detection(
+            st.session_state.bbox, st.session_state.force_dates, use_sample=use_sample_flag
         )
 except Exception as exc:
-    st.error(f"**Pipeline error:** {exc}")
-    st.code(traceback.format_exc())
+    print(f"STAC failure reason: {exc}", flush=True)
+    st.error(f"**STAC satellite telemetry acquisition failed:** {exc}")
+    if st.button("Use bundled sample data (Aug 21, 2024 vs Sep 15, 2024)", type="secondary"):
+        st.session_state["use_bundled_sample"] = True
+        st.rerun()
     st.stop()
 
-# Restore numpy arrays from cache
-ndvi_data: dict = {}
-for k, v in ndvi_data_raw.items():
-    ndvi_data[k] = np.array(v) if isinstance(v, list) else v
-
+if ndvi_data.get("is_sample"):
+    st.warning("⚠️ **Bundled sample data in use:** Displaying local validated Sentinel-2 scenes (Aug 21, 2024 vs Sep 15, 2024). STAC satellite telemetry was bypassed.")
 
 # ---------------------------------------------------------------------------
 # Scan Summary
@@ -347,10 +291,25 @@ for k, v in ndvi_data_raw.items():
 st.markdown("---")
 st.markdown("## Scan Summary")
 
-t0_date = ndvi_data.get("t0_date", "local")
-t1_date = ndvi_data.get("t1_date", "local")
-total_ha = sum(c["pixel_count"] * 0.01 for c in clusters)
-near_water_count = sum(1 for c in clusters if c.get("near_water"))
+is_sample = ndvi_data.get("is_sample", False)
+t0_date = ndvi_data.get("t0_date", "N/A")
+t1_date = ndvi_data.get("t1_date", "N/A")
+scene_t0 = ndvi_data.get("scene_t0", "N/A")
+scene_t1 = ndvi_data.get("scene_t1", "N/A")
+
+if is_sample:
+    dates_display = "Bundled sample: Aug 21, 2024 -> Sep 15, 2024"
+else:
+    dates_display = f"{t0_date} → {t1_date}"
+
+st.markdown(
+    f"**Observation Dates:** `{dates_display}` &nbsp;|&nbsp; "
+    f"**T0 Scene:** `{scene_t0}` &nbsp;|&nbsp; "
+    f"**T1 Scene:** `{scene_t1}`"
+)
+
+total_flagged_ha = sum(c["pixel_count"] * 0.01 for c in clusters if c["status"] != "SUPPRESSED")
+near_water_count = sum(1 for c in clusters if c.get("near_water") and c["status"] != "SUPPRESSED")
 
 # 1 — Detection funnel
 st.markdown("### Detection Funnel")
@@ -376,12 +335,14 @@ with st.expander("Fill-ratio & Status per cluster"):
 # 2 — Vegetation-loss area by land-use class
 st.markdown("### Vegetation-loss area (proxy) by Baseline Land Use")
 mc1, mc2 = st.columns(2)
-mc1.metric("Total flagged area (ha)", f"{total_ha:.2f}")
+mc1.metric("Total flagged area (est. ha)", f"{total_flagged_ha:.2f} est. ha")
 mc2.metric("Clusters within 100 m of water", near_water_count)
 
 lu_ha: dict[str, float] = {}
 for c in clusters:
-    lu = c.get("dominant_class") or "Unknown"
+    if c.get("status") == "SUPPRESSED":
+        continue
+    lu = c.get("dominant_class") or "No survey coverage"
     lu_ha[lu] = round(lu_ha.get(lu, 0.0) + c["pixel_count"] * 0.01, 3)
 
 if lu_ha:
@@ -399,7 +360,7 @@ if lu_ha:
     bars = base.mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
         x=alt.X(
             "Area (ha):Q",
-            title="Area (ha)",
+            title="Area (est. ha)",
             scale=alt.Scale(domain=x_domain),
             axis=alt.Axis(labelColor="#e0e0e0", titleColor="#e0e0e0", gridColor="#2d3748")
         ),
@@ -414,7 +375,7 @@ if lu_ha:
             scale=alt.Scale(domain=domain, range=range_colors),
             legend=None
         ),
-        tooltip=["Land Use", alt.Tooltip("Area (ha):Q", format=".2f")]
+        tooltip=["Land Use", alt.Tooltip("Area (ha):Q", format=".2f", title="Area (est. ha)")]
     )
 
     text = base.mark_text(
@@ -446,8 +407,8 @@ if lu_ha:
 # 4 — NDVI timeseries for best cluster (highest priority)
 st.markdown("### NDVI Timeseries — Top Cluster (12 months)")
 if clusters:
-    # Prefer CANDIDATE / PROVISIONAL — never plot a SUPPRESSED cluster as the headline
-    active = [c for c in clusters if c["status"] in ("CANDIDATE", "PROVISIONAL")]
+    # Prefer FLAGGED_FOR_REVIEW / CANDIDATE / WATCHLIST — never plot a SUPPRESSED cluster as the headline
+    active = [c for c in clusters if c["status"] in ("FLAGGED_FOR_REVIEW", "CANDIDATE", "WATCHLIST")]
     top_cluster = max(
         active if active else clusters,
         key=lambda c: c.get("priority_score", 0.0),
@@ -475,12 +436,19 @@ if clusters:
         import altair as alt
         ts_df = pd.DataFrame(ts)
         ts_chart = alt.Chart(ts_df).mark_line(point=True).encode(
-            x=alt.X("date:T", title="Acquisition Date"),
+            x=alt.X("date:T", title="Acquisition Date", axis=alt.Axis(format="%b %Y", labelColor="#e0e0e0", titleColor="#e0e0e0")),
             y=alt.Y("ndvi:Q", title="NDVI (10m Resolution)"),
-            tooltip=["date:T", "ndvi:Q"]
+            tooltip=[alt.Tooltip("date:T", format="%d %b %Y", title="Date"), alt.Tooltip("ndvi:Q", format=".3f", title="NDVI")]
         ).properties(height=300).configure_axis(labelFontSize=12, titleFontSize=14)
         st.altair_chart(ts_chart, width='stretch')
-        st.caption(f"Cluster {top_cluster['id']} (Lat: {top_cluster['lat']}, Lon: {top_cluster['lon']}) — Harvest dips then regrows; sustained low NDVI is consistent with clearing. *Note: If NDVI strongly recovers later in the year, the initial drop was likely a seasonal harvest.*")
+        if len(ts) >= 2:
+            pre_event_ndvi = ts[0]["ndvi"]
+            last_ndvi = ts[-1]["ndvi"]
+            diff = abs(last_ndvi - pre_event_ndvi)
+            trajectory = "recovers: possibly seasonal" if diff <= 0.1 else "stays low after the event"
+            st.caption(f"Cluster {top_cluster['id']} (Lat: {top_cluster['lat']}, Lon: {top_cluster['lon']}) — {trajectory}.")
+        else:
+            st.caption(f"Cluster {top_cluster['id']} (Lat: {top_cluster['lat']}, Lon: {top_cluster['lon']})")
     else:
         st.info("Timeseries unavailable (STAC not reachable or no clear scenes found).")
 
@@ -506,7 +474,7 @@ else:
             "Cluster ID": c["id"],
             "Status": c["status"],
             "Priority Score": c.get("priority_score", 0.0),
-            "Baseline Land Use (FMDA)": c.get("dominant_class", "Agriculture Cropland"),
+            "Baseline Land Use (FMDA survey)": c.get("dominant_class", "Agriculture Cropland"),
             "Near Water (<100m)": " Yes" if c.get("near_water") else "No",
             "Pixels": c["pixel_count"],
             "Fill Ratio": f"{c['fill_ratio']:.4f}",
@@ -518,7 +486,7 @@ else:
     ])
 
     def _style_status(val):
-        if val == "CANDIDATE":
+        if val in ("FLAGGED_FOR_REVIEW", "CANDIDATE"):
             return "background-color:#fff3cd; color:#856404; font-weight:600;"
         if val == "SUPPRESSED":
             return "background-color:#e2e3e5; color:#495057; font-weight:600;"
@@ -527,12 +495,12 @@ else:
     styled_df = df.style.map(_style_status, subset=["Status"])
     st.dataframe(styled_df, width="stretch", hide_index=True)
 
-    n_cand = sum(1 for c in clusters if c["status"] == "CANDIDATE")
+    n_flag = sum(1 for c in clusters if c["status"] in ("FLAGGED_FOR_REVIEW", "CANDIDATE"))
     n_supp = sum(1 for c in clusters if c["status"] == "SUPPRESSED")
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Clusters", len(clusters))
     n_watch = sum(1 for c in clusters if c["status"] == "WATCHLIST")
-    m2.metric("WATCHLIST / CANDIDATE", n_cand + n_watch)
+    m2.metric("WATCHLIST / FLAGGED_FOR_REVIEW", n_flag + n_watch)
     m3.metric("SUPPRESSED (artifact)", n_supp)
 
 # ---------------------------------------------------------------------------
@@ -541,36 +509,40 @@ else:
 st.markdown("---")
 st.markdown("## Environmental Impact & UHI Risk Summary")
 try:
-    from utils.config import calculate_scanned_ha
-    bbox = st.session_state.bbox
-    total_footprint_ha = calculate_scanned_ha(bbox)
+    transform = ndvi_data.get("transform")
+    shape = ndvi_data.get("shape")
+    crs = ndvi_data.get("crs")
+    if transform is not None and shape is not None:
+        total_footprint_ha = calculate_raster_scanned_ha(transform, shape, crs)
+    else:
+        total_footprint_ha = calculate_scanned_ha(st.session_state.bbox)
     
-    cand_ha = sum(c["pixel_count"] for c in clusters if c["status"] == "CANDIDATE") * 0.01
+    cand_ha = sum(c["pixel_count"] for c in clusters if c["status"] in ("FLAGGED_FOR_REVIEW", "CANDIDATE")) * 0.01
     watch_ha = sum(c["pixel_count"] for c in clusters if c["status"] == "WATCHLIST") * 0.01
     total_veg_loss_ha = cand_ha + watch_ha
-    water_prox_count = sum(1 for c in clusters if c.get("near_water"))
+    water_prox_count = sum(1 for c in clusters if c.get("near_water") and c["status"] != "SUPPRESSED")
 
     i1, i2, i3, i4 = st.columns(4)
-    i1.metric("Area scanned (est. ha)", f"{total_footprint_ha:,.0f} ha")
+    i1.metric("Area scanned (est. ha)", f"{total_footprint_ha:,.0f} est. ha")
     with i2:
         st.metric("Vegetation loss (ha), thermal-buffer proxy", f"{total_veg_loss_ha:.2f} est. ha")
         st.caption("No temperature measured.")
-    i3.metric("Candidate", f"{cand_ha:.2f} est. ha")
+    i3.metric("Flagged for Review", f"{cand_ha:.2f} est. ha")
     i4.metric("Watchlist", f"{watch_ha:.2f} est. ha")
 
-    st.caption("**Status Guide:** SUPPRESSED (geometric artifact), BELOW_THRESHOLD (seasonal/crop), WATCHLIST (new change, not yet confirmed), CANDIDATE (persistent). *Note: Persistence tracking is a planned next step. Until implemented, anomalies will remain WATCHLIST.*")
+    st.caption("**Status Guide:** SUPPRESSED (geometric artifact), BELOW_THRESHOLD (seasonal/crop), WATCHLIST (new change, not yet confirmed), FLAGGED_FOR_REVIEW (high-confidence anomaly).")
     
 except Exception as e:
     st.warning(f"Could not load summary metrics: {e}")
 
-candidates = [c for c in clusters if c["status"] in ("CANDIDATE", "WATCHLIST")]
+candidates = [c for c in clusters if c["status"] in ("FLAGGED_FOR_REVIEW", "WATCHLIST", "CANDIDATE")]
 
 if candidates:
     st.markdown("---")
-    st.markdown("##  Government Action Queue (Ranked Interdiction Priority)")
+    st.markdown("## Review Queue (Ranked Inspection Priority)")
     st.caption(
-        "Interdiction candidates ranked by enforcement urgency. Scoring fuses Sentinel-2 vegetation clearing drop "
-        "(NDVI Δ), disturbance footprint, official **FMDA baseline land use** (Level1_des), and **100m waterbody buffer** proximity."
+        "Disturbance clusters ranked by inspection priority. Scoring fuses Sentinel-2 vegetation clearing drop "
+        "(NDVI Δ), disturbance footprint, FMDA survey (cached) baseline land use (Level1_des), and **100m waterbody buffer** proximity."
     )
 
     action_queue_data = [
@@ -616,7 +588,7 @@ if candidates:
             f"Rank #{idx} | Cluster {c['id']} | Priority: {c.get('priority_score', 0)} | {c.get('dominant_class', 'Agriculture')} | NDVI Δ {c['ndvi_drop_mean']:.4f}": c
             for idx, c in enumerate(candidates, 1)
         }
-        chosen_label = st.selectbox("Select CANDIDATE cluster to verify:", list(cluster_labels))
+        chosen_label = st.selectbox("Select cluster to verify:", list(cluster_labels))
         selected_cluster = cluster_labels[chosen_label]
 
     st.markdown(
@@ -670,7 +642,7 @@ if candidates:
             st.code(st.session_state.get("_exc_trace", ""))
 
     # ── Display structured alert card ─────────────────────────────────────
-    report: InterdictionReport | None = st.session_state.get("bedrock_report")
+    report: ReviewReport | None = st.session_state.get("bedrock_report")
     if report:
         is_flag = report.action == "FLAG_FOR_REVIEW"
         card_cls = "alert-high" if is_flag else "alert-low"
@@ -690,11 +662,17 @@ if candidates:
             else f"Outside 100m Buffer ({water_dist_val} m)"
         )
 
+        escaped_parcel_id = html.escape(str(report.parcel_id))
+        escaped_violation_type = html.escape(str(report.violation_type))
+        escaped_land_use = html.escape(str(land_use_text))
+        escaped_water_prox = html.escape(str(water_prox_text))
+        escaped_reasoning = html.escape(str(report.reasoning))
+
         st.markdown(
             f"""
             <div class="alert-card {card_cls}">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; border-bottom:1px solid #e5e7eb; padding-bottom:0.75rem;">
-                    <h3 style="margin:0; color:#111827 !important; font-size:1.3rem; font-weight:700;">Interdiction Report — {report.parcel_id}</h3>
+                    <h3 style="margin:0; color:#111827 !important; font-size:1.3rem; font-weight:700;">Review Report — {escaped_parcel_id}</h3>
                     <span style="background:{badge_bg}; color:{badge_color} !important; font-weight:700; font-size:0.9rem; padding:4px 12px; border-radius:999px; border:1px solid {badge_color}40;">
                         {action_badge}
                     </span>
@@ -702,15 +680,15 @@ if candidates:
                 <table style="width:100%; border-collapse:collapse; color:#1f2937 !important;">
                 <tr>
                     <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; width:170px;">Suspected Activity</td>
-                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{report.violation_type}</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{escaped_violation_type}</td>
                 </tr>
                 <tr>
                     <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">Baseline Land Use (FMDA)</td>
-                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{land_use_text}</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{escaped_land_use}</td>
                 </tr>
                 <tr>
                     <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">Waterbody Proximity</td>
-                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{water_prox_text}</td>
+                    <td style="color:#111827 !important; font-size:0.95rem; font-weight:600;">{escaped_water_prox}</td>
                 </tr>
                 <tr>
                     <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600;">AI Confidence</td>
@@ -718,7 +696,7 @@ if candidates:
                 </tr>
                 <tr>
                     <td style="padding:6px 16px 6px 0; color:#4b5563 !important; font-size:0.9rem; font-weight:600; vertical-align:top;">Reasoning</td>
-                    <td style="color:#1f2937 !important; font-size:0.95rem; line-height:1.55; font-style:italic;">{report.reasoning}</td>
+                    <td style="color:#1f2937 !important; font-size:0.95rem; line-height:1.55; font-style:italic;">{escaped_reasoning}</td>
                 </tr>
                 </table>
             </div>
@@ -734,8 +712,9 @@ if candidates:
                 st.markdown(f"**Model ID:** `{report.model_used}`  |  **Region:** `{report.region_used}`")
                 st.code(report.raw_json, language="json")
 
-        # Optional S3 upload button
-        if crop:
+        # Optional S3 upload button (hidden if S3 bucket env var not set)
+        s3_bucket = os.getenv("GROUNDTRUTH_S3_BUCKET")
+        if crop and s3_bucket:
             if st.button(" Upload report + crop to S3", width="stretch"):
                 with st.spinner("Uploading to S3…"):
                     try:
@@ -788,7 +767,7 @@ if candidates:
         bounds=[[min_lat, min_lon], [max_lat, max_lon]],
         opacity=0.75,
         transparent=True,
-        name=" FMDA Master Plan 2031 (Statutory Zoning)",
+        name=" FMDA Master Plan 2031 (Zoning)",
         overlay=True,
         control=True,
         show=False,
@@ -838,7 +817,7 @@ if candidates:
 
     st_folium(fmap, width="100%", height=480, returned_objects=[])
 
-    with st.expander(" Official FMDA Statutory Legend (Direct from State GIS Server)", expanded=False):
+    with st.expander(" FMDA Cartography Legend (State GIS Server)", expanded=False):
         tab1, tab2 = st.tabs([" Land Use Cadastral Survey", " Master Plan 2031 Zoning"])
 
         with tab1:
@@ -871,7 +850,7 @@ if candidates:
                             f'<div style="display:flex; align-items:center; margin-bottom:8px;">'
                             f'<span style="display:inline-block; width:16px; height:16px; background-color:{color}; border-radius:3px; margin-right:8px; border:1px solid #555;"></span>'
                             f'<span style="font-size:12px; color:#e0e0e0;">{label}</span>'
-                            f'</div>',
+                            f'</div>', 
                             unsafe_allow_html=True
                         )
 
@@ -896,7 +875,7 @@ else:
     n_supp = sum(1 for c in clusters if c["status"] == "SUPPRESSED")
     n_bel = sum(1 for c in clusters if c["status"] == "BELOW_THRESHOLD")
     st.info(
-        f" No CANDIDATE or WATCHLIST clusters found.\\n\\n"
+        f" No FLAGGED_FOR_REVIEW or WATCHLIST clusters found.\\n\\n"
         f"**Breakdown:** {n_supp} suppressed as sensor artifacts, {n_bel} seasonal/below threshold."
     )
 

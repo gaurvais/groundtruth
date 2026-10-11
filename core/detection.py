@@ -1,42 +1,27 @@
 from __future__ import annotations
-import datetime as dt
-import hashlib
-import io
-import json
-import logging
-import os
-import ssl
-from pathlib import Path
-from typing import Literal
 
-import boto3
+import logging
+from pathlib import Path
+
 import numpy as np
 import rasterio
 from rasterio.transform import xy as rio_xy
-from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
-from rasterio.enums import Resampling
-from rasterio.warp import transform as warp_transform
-import requests
-import urllib3
-from requests.adapters import HTTPAdapter
-from shapely.geometry import shape, Point, box
-from PIL import Image
-from pydantic import BaseModel, field_validator
 from scipy import ndimage
-from dotenv import load_dotenv
 
-try:
-    from pystac_client import Client as STACClient
-    HAS_PYSTAC = True
-except ImportError:
-    HAS_PYSTAC = False
+from core.stac_ingestion import stac_compute_ndvi
+from integrations.fmda import enrich_clusters_with_land_use
+from utils.config import (
+    FILL_RATIO_ARTIFACT_THRESHOLD,
+    MIN_CLUSTER_PIXELS,
+    NDVI_THRESHOLD,
+    T0_B04,
+    T0_B08,
+    T1_B04,
+    T1_B08,
+    USE_STAC,
+)
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-load_dotenv()
-from utils.config import *
-from core.stac_ingestion import *
-from integrations.fmda import *
+log = logging.getLogger(__name__)
 
 
 def _load_band(path: Path) -> tuple[np.ndarray, rasterio.transform.Affine, object]:
@@ -90,6 +75,10 @@ def load_and_compute_ndvi() -> dict:
         "transform": transform,
         "crs": crs,
         "shape": ndvi_t0.shape,
+        "t0_date": "2024-08-21",
+        "t1_date": "2024-09-15",
+        "scene_t0": "Bundled Sample T0 (2024-08-21)",
+        "scene_t1": "Bundled Sample T1 (2024-09-15)",
     }
 
 
@@ -122,7 +111,7 @@ def extract_clusters(ndvi_data: dict) -> list[dict]:
     For each component big enough (≥ MIN_CLUSTER_PIXELS):
       - compute bounding box in pixel coords
       - convert centroid to lat/lon via rasterio.transform.xy
-      - compute fill_ratio and decide status: CANDIDATE or SUPPRESSED
+      - compute fill_ratio and decide status: FLAGGED_FOR_REVIEW or SUPPRESSED
 
     Returns a list of cluster dicts:
       {id, bbox, lat, lon, ndvi_drop_mean, pixel_count, fill_ratio, status}
@@ -133,50 +122,51 @@ def extract_clusters(ndvi_data: dict) -> list[dict]:
 
     labeled_array, n_labels = ndimage.label(mask)
     log.info("Found %d raw connected components.", n_labels)
+    if n_labels == 0:
+        return []
 
+    counts = np.bincount(labeled_array.ravel())
+    valid_labels = [lbl for lbl in range(1, n_labels + 1) if counts[lbl] >= MIN_CLUSTER_PIXELS]
+    if not valid_labels:
+        return []
+
+    slices = ndimage.find_objects(labeled_array)
     clusters = []
-    for label_id in range(1, n_labels + 1):
-        comp_mask = labeled_array == label_id
-        pixel_count = int(comp_mask.sum())
-        if pixel_count < MIN_CLUSTER_PIXELS:
-            continue  # too small — ignore
+    xs_to_reproject = []
+    ys_to_reproject = []
 
-        # Bounding box
-        rows = np.where(np.any(comp_mask, axis=1))[0]
-        cols = np.where(np.any(comp_mask, axis=0))[0]
-        row_min, row_max = int(rows[0]), int(rows[-1])
-        col_min, col_max = int(cols[0]), int(cols[-1])
+    for label_id in valid_labels:
+        slc = slices[label_id - 1]
+        if slc is None:
+            continue
+        sub_mask = (labeled_array[slc] == label_id)
+        pixel_count = int(counts[label_id])
+
+        row_slice, col_slice = slc
+        row_min, row_max = row_slice.start, row_slice.stop - 1
+        col_min, col_max = col_slice.start, col_slice.stop - 1
 
         bbox_area = (row_max - row_min + 1) * (col_max - col_min + 1)
         fill_ratio = round(pixel_count / bbox_area, 4) if bbox_area > 0 else 0.0
 
-        # Centroid → lat / lon
         centroid_row = (row_min + row_max) // 2
         centroid_col = (col_min + col_max) // 2
         x, y = rio_xy(transform, centroid_row, centroid_col)
-        
-        # Reproject to EPSG:4326 if needed
-        crs = ndvi_data["crs"]
-        if crs.to_string() != "EPSG:4326":
-            from rasterio.warp import transform as warp_transform
-            lons, lats = warp_transform(crs, "EPSG:4326", [x], [y])
-            lon, lat = lons[0], lats[0]
-        else:
-            lon, lat = x, y
+        xs_to_reproject.append(x)
+        ys_to_reproject.append(y)
 
         # Mean NDVI drop inside cluster
-        ndvi_drop_mean = float(np.mean(delta[comp_mask]))
+        sub_delta = delta[slc]
+        ndvi_drop_mean = float(np.mean(sub_delta[sub_mask]))
 
         # Artifact check
-        artifact = is_artifact_shaped(comp_mask)
+        artifact = is_artifact_shaped(sub_mask)
         is_stac = "scene_t1" in ndvi_data
-        status = "SUPPRESSED" if artifact else ("WATCHLIST" if is_stac else "CANDIDATE")
+        status = "SUPPRESSED" if artifact else ("WATCHLIST" if is_stac else "FLAGGED_FOR_REVIEW")
 
         cluster_dict = {
             "id": label_id,
             "bbox": (row_min, col_min, row_max, col_max),
-            "lat": round(float(lat), 6),
-            "lon": round(float(lon), 6),
             "ndvi_drop_mean": round(ndvi_drop_mean, 4),
             "pixel_count": pixel_count,
             "fill_ratio": fill_ratio,
@@ -193,10 +183,22 @@ def extract_clusters(ndvi_data: dict) -> list[dict]:
             
         clusters.append(cluster_dict)
 
+    # Batch reproject centroids to EPSG:4326 in one call
+    crs = ndvi_data["crs"]
+    if crs and crs.to_string() != "EPSG:4326":
+        from rasterio.warp import transform as warp_transform
+        lons, lats = warp_transform(crs, "EPSG:4326", xs_to_reproject, ys_to_reproject)
+    else:
+        lons, lats = xs_to_reproject, ys_to_reproject
+
+    for c, lon, lat in zip(clusters, lons, lats):
+        c["lon"] = round(float(lon), 6)
+        c["lat"] = round(float(lat), 6)
+
     log.info(
-        "Clusters after size filter: %d  (%d CANDIDATE, %d SUPPRESSED)",
+        "Clusters after size filter: %d  (%d FLAGGED, %d SUPPRESSED)",
         len(clusters),
-        sum(1 for c in clusters if c["status"] == "CANDIDATE"),
+        sum(1 for c in clusters if c["status"] in ("FLAGGED_FOR_REVIEW", "WATCHLIST", "CANDIDATE")),
         sum(1 for c in clusters if c["status"] == "SUPPRESSED"),
     )
     return clusters

@@ -1,40 +1,28 @@
 from __future__ import annotations
-import datetime as dt
+
 import hashlib
 import io
 import json
 import logging
-import os
-import ssl
 from pathlib import Path
-from typing import Literal
 
-import boto3
 import numpy as np
-import rasterio
-from rasterio.transform import xy as rio_xy
-from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
-from rasterio.enums import Resampling
-from rasterio.warp import transform as warp_transform
 import requests
+import streamlit as st
 import urllib3
-from requests.adapters import HTTPAdapter
-from shapely.geometry import shape, Point, box
 from PIL import Image
-from pydantic import BaseModel, field_validator
-from scipy import ndimage
-from dotenv import load_dotenv
+from rasterio.transform import xy as rio_xy
+from rasterio.warp import transform as warp_transform
+from shapely.geometry import Point, box, shape
 
-try:
-    from pystac_client import Client as STACClient
-    HAS_PYSTAC = True
-except ImportError:
-    HAS_PYSTAC = False
+from utils.config import (
+    DATA_DIR,
+    FMDA_LAND_USE_QUERY_URL,
+    LegacyRenegotiationAdapter,
+)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-load_dotenv()
-from utils.config import *
+log = logging.getLogger(__name__)
 
 
 LAND_USE_CACHE_FILE: Path = DATA_DIR / "land_use.geojson"
@@ -45,15 +33,17 @@ def fetch_and_cache_land_use(
     output_path: Path | None = None,
 ) -> dict:
     """
-    Fetch vector land-use polygons covering our Faridabad tile from the
-    official FMDA Land Use ArcGIS REST API:
-    https://onemapdepts.gmda.gov.in/server1/rest/services/FMDA/FMDA_Land_Use/MapServer/1/query
-
-    Query using tile bounding box (inSR=4326, outSR=4326, f=geojson,
-    outFields=Level1_des, where=1=1, returnGeometry=true), and cache locally
-    as data/land_use.geojson. Uses verify=False + LegacyRenegotiationAdapter.
+    Fetch vector land-use polygons covering scan bbox from the official FMDA API.
+    Caches per bbox hash in Data/cache/land_use_<hash>.geojson.
     """
-    target_path = output_path or LAND_USE_CACHE_FILE
+    if bbox is not None:
+        min_lon, min_lat, max_lon, max_lat = bbox
+        bbox_hash = hashlib.md5(f"{min_lon:.4f}_{min_lat:.4f}_{max_lon:.4f}_{max_lat:.4f}".encode()).hexdigest()[:10]
+        target_path = output_path or (DATA_DIR / "cache" / f"land_use_{bbox_hash}.geojson")
+    else:
+        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
+        target_path = output_path or LAND_USE_CACHE_FILE
+
     if target_path.exists():
         try:
             log.info("Loading cached baseline land-use GeoJSON from %s", target_path)
@@ -63,12 +53,6 @@ def fetch_and_cache_land_use(
 
     session = requests.Session()
     session.mount("https://", LegacyRenegotiationAdapter())
-
-    # Default tile bounding box in EPSG:4326 (min_lon, min_lat, max_lon, max_lat)
-    if bbox is not None:
-        min_lon, min_lat, max_lon, max_lat = bbox
-    else:
-        min_lon, min_lat, max_lon, max_lat = 77.275, 28.305, 77.297, 28.327
 
     params = {
         "where": "1=1",
@@ -82,15 +66,27 @@ def fetch_and_cache_land_use(
         "f": "geojson",
     }
 
-    log.info("Querying FMDA MapServer land-use layer for bbox [%s]...", params["geometry"])
-    resp = session.get(FMDA_LAND_USE_QUERY_URL, params=params, verify=False, timeout=30)
-    resp.raise_for_status()
-    geojson_data = resp.json()
+    try:
+        log.info("Querying FMDA MapServer land-use layer for bbox [%s]...", params["geometry"])
+        resp = session.get(FMDA_LAND_USE_QUERY_URL, params=params, verify=False, timeout=20)
+        resp.raise_for_status()
+        geojson_data = resp.json()
+        if geojson_data.get("features"):
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(json.dumps(geojson_data, indent=2), encoding="utf-8")
+            log.info("Saved %d land-use features to %s", len(geojson_data["features"]), target_path)
+            return geojson_data
+    except Exception as exc:
+        log.warning("FMDA land-use query failed (%s). Checking fallback cache.", exc)
 
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(json.dumps(geojson_data, indent=2), encoding="utf-8")
-    log.info("Saved %d land-use features to %s", len(geojson_data.get("features", [])), target_path)
-    return geojson_data
+    if LAND_USE_CACHE_FILE.exists():
+        try:
+            log.info("Falling back to bundled baseline land-use: %s", LAND_USE_CACHE_FILE)
+            return json.loads(LAND_USE_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    return {"type": "FeatureCollection", "features": []}
 
 
 def fetch_transparent_master_plan(
@@ -140,15 +136,25 @@ def enrich_clusters_with_land_use(
 ) -> list[dict]:
     """
     For each detected disturbance cluster:
-      1. Spatial intersection with FMDA vector polygons to compute its dominant
-         baseline land use from Level1_des (e.g. 'Agriculture Cropland', 'Forest',
-         'Waterbody Canal').
-      2. Flag if within 100m of a waterbody (near_water = True).
-      3. Compute priority score based on cluster area, mean NDVI drop, near_water,
-         and baseline zoning severity.
+      1. Spatial intersection with FMDA vector polygons to compute dominant baseline land use.
+      2. Reproject cluster corner coordinates to EPSG:4326 using ndvi_data["crs"].
+      3. If no polygon covers cluster, set dominant_class = 'No survey coverage' and near_water = None.
+      4. Return ALL clusters (every status), sorted by priority score descending.
     """
+    transform = ndvi_data["transform"]
+    crs = ndvi_data.get("crs")
+    h, w = ndvi_data["shape"]
+
     if geojson_data is None:
-        geojson_data = fetch_and_cache_land_use()
+        x0, y0 = rio_xy(transform, 0, 0)
+        x1, y1 = rio_xy(transform, h, w)
+        if crs and str(crs) not in ("EPSG:4326", "4326"):
+            from rasterio.warp import transform as rio_warp_transform
+            lons, lats = rio_warp_transform(crs, "EPSG:4326", [x0, x1], [y0, y1])
+            scan_bbox = (min(lons), min(lats), max(lons), max(lats))
+        else:
+            scan_bbox = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        geojson_data = fetch_and_cache_land_use(bbox=scan_bbox)
 
     features = geojson_data.get("features", [])
     polygons: list[tuple[object, str]] = []
@@ -164,12 +170,35 @@ def enrich_clusters_with_land_use(
         except Exception as exc:
             log.warning("Skipping feature geometry: %s", exc)
 
-    transform = ndvi_data["transform"]
+    # Batch reproject all cluster corners
+    if clusters:
+        x1s, y1s, x2s, y2s = [], [], [], []
+        for c in clusters:
+            r_min, c_min, r_max, c_max = c["bbox"]
+            x1, y1 = rio_xy(transform, r_min, c_min)
+            x2, y2 = rio_xy(transform, r_max, c_max)
+            x1s.append(x1)
+            y1s.append(y1)
+            x2s.append(x2)
+            y2s.append(y2)
 
-    for c in clusters:
-        r_min, c_min, r_max, c_max = c["bbox"]
-        lon1, lat1 = rio_xy(transform, r_min, c_min)
-        lon2, lat2 = rio_xy(transform, r_max, c_max)
+        if crs and str(crs) not in ("EPSG:4326", "4326"):
+            all_xs = x1s + x2s
+            all_ys = y1s + y2s
+            all_lons, all_lats = warp_transform(crs, "EPSG:4326", all_xs, all_ys)
+            n = len(clusters)
+            lon1s, lon2s = all_lons[:n], all_lons[n:]
+            lat1s, lat2s = all_lats[:n], all_lats[n:]
+        else:
+            lon1s, lon2s = x1s, x2s
+            lat1s, lat2s = y1s, y2s
+    else:
+        lon1s, lon2s, lat1s, lat2s = [], [], [], []
+
+    for idx, c in enumerate(clusters):
+        lon1, lon2 = lon1s[idx], lon2s[idx]
+        lat1, lat2 = lat1s[idx], lat2s[idx]
+
         c_box = box(min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2))
         c_point = Point(c["lon"], c["lat"])
 
@@ -184,50 +213,42 @@ def enrich_clusters_with_land_use(
             dominant_class = max(intersections, key=intersections.get)
         else:
             containing = [cls_name for geom, cls_name in polygons if geom.contains(c_point)]
-            dominant_class = containing[0] if containing else "Agriculture Cropland"
+            dominant_class = containing[0] if containing else "No survey coverage"
 
         # Waterbody proximity (< 100m buffer)
-        # At latitude ~28.3°N, 1 degree ~ 111,000 meters
-        near_water = False
-        min_water_dist_m = 999999.0
-        for wg in water_polys:
-            dist_m = c_point.distance(wg) * 111000.0
-            if dist_m < min_water_dist_m:
-                min_water_dist_m = dist_m
-            if dist_m <= 100.0:
-                near_water = True
+        if dominant_class == "No survey coverage":
+            near_water = None
+            min_water_dist_m = 999999.0
+        else:
+            near_water = False
+            min_water_dist_m = 999999.0
+            for wg in water_polys:
+                dist_m = c_point.distance(wg) * 111000.0
+                min_water_dist_m = min(min_water_dist_m, dist_m)
+                if dist_m <= 100.0:
+                    near_water = True
 
         # Priority scoring:
-        # - Cluster area factor: larger clearing = higher impact (0 to 35 pts)
-        # - NDVI drop severity: higher drop = more severe clearing (0 to 35 pts)
-        # - Waterbody buffer violation (<100m violates canal/lake buffers): +20 pts
-        # - Agricultural/forest conversion: +10 pts
         pix = c["pixel_count"]
         ndvi_drop = c["ndvi_drop_mean"]
         area_norm = min(1.0, pix / 1000.0)
         ndvi_norm = min(1.0, max(0.0, (ndvi_drop - 0.15) / 0.35))
-        water_bonus = 20.0 if near_water else 0.0
-        agri_bonus = 10.0 if any(k in dominant_class.lower() for k in ["agri", "forest", "crop"]) else 0.0
+        water_bonus = 20.0 if (near_water is True) else 0.0
+        agri_bonus = 10.0 if (dominant_class and any(k in dominant_class.lower() for k in ["agri", "forest", "crop"])) else 0.0
 
         priority_score = round((area_norm * 35.0) + (ndvi_norm * 35.0) + water_bonus + agri_bonus, 1)
 
         c["dominant_class"] = dominant_class
         c["near_water"] = near_water
-        c["water_dist_m"] = round(min_water_dist_m, 1)
+        c["water_dist_m"] = round(min_water_dist_m, 1) if min_water_dist_m < 999999.0 else None
         c["priority_score"] = priority_score
 
-    # Sort candidates by priority score descending
-    candidates = [c for c in clusters if c["status"] in ("CANDIDATE", "PROVISIONAL")]
-    candidates.sort(key=lambda x: x["priority_score"], reverse=True)
-    suppressed = [c for c in clusters if c["status"] == "SUPPRESSED"]
-
-    return candidates + suppressed
+    # Return ALL clusters (every status), sorted by priority score descending
+    clusters.sort(key=lambda x: x.get("priority_score", 0.0), reverse=True)
+    return clusters
 
 
 
-import streamlit as st
-from utils.config import LegacyRenegotiationAdapter
-import requests
 def get_legacy_session():
     session = requests.Session()
     adapter = LegacyRenegotiationAdapter()

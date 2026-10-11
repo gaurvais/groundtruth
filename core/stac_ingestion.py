@@ -1,40 +1,45 @@
 from __future__ import annotations
+
+import calendar
 import datetime as dt
 import hashlib
-import io
 import json
 import logging
-import os
-import ssl
 from pathlib import Path
-from typing import Literal
 
-import boto3
 import numpy as np
 import rasterio
-from rasterio.transform import xy as rio_xy
-from rasterio.warp import transform_bounds
-from rasterio.windows import from_bounds
 from rasterio.enums import Resampling
 from rasterio.warp import transform as warp_transform
-import requests
-import urllib3
-from requests.adapters import HTTPAdapter
-from shapely.geometry import shape, Point, box
-from PIL import Image
-from pydantic import BaseModel, field_validator
+from rasterio.warp import transform_bounds
+from rasterio.windows import from_bounds
 from scipy import ndimage
-from dotenv import load_dotenv
+from shapely.geometry import box, shape
 
 try:
     from pystac_client import Client as STACClient
     HAS_PYSTAC = True
 except ImportError:
     HAS_PYSTAC = False
+    STACClient = None
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-load_dotenv()
-from utils.config import *
+from utils.config import (
+    DATA_DIR,
+    DEFAULT_BBOX_LONLAT,
+    DEFAULT_REFLECTANCE_OFFSET,
+    DEFAULT_REFLECTANCE_SCALE,
+    MIN_VALID_FRACTION,
+    NDVI_THRESHOLD,
+    SCL_INVALID_CLASSES,
+    STAC_API_URL,
+    STAC_COLLECTION,
+    STAC_SEARCH_DAYS_BACK,
+    T0_GAP_DAYS_MAX,
+    T0_GAP_DAYS_MIN,
+    T0_GAP_IDEAL_DAYS,
+)
+
+log = logging.getLogger(__name__)
 
 
 CACHE_DIR = DATA_DIR / "cache"
@@ -69,14 +74,13 @@ def _scl_valid_fraction(item, bbox_lonlat: tuple[float, float, float, float]) ->
         "GDAL_HTTP_RETRY_DELAY": "1",
         "AWS_NO_SIGN_REQUEST": "YES",
     }
-    with rasterio.Env(**env_opts):
-        with rasterio.open(scl_href) as src:
-            # Transform bbox from EPSG:4326 → dataset CRS
-            dst_bounds = transform_bounds("EPSG:4326", src.crs, *bbox_lonlat)
-            win = from_bounds(*dst_bounds, transform=src.transform)
-            # Clamp window to dataset extent
-            win = win.intersection(rasterio.windows.Window(0, 0, src.width, src.height))
-            scl = src.read(1, window=win)
+    with rasterio.Env(**env_opts), rasterio.open(scl_href) as src:
+        # Transform bbox from EPSG:4326 → dataset CRS
+        dst_bounds = transform_bounds("EPSG:4326", src.crs, *bbox_lonlat)
+        win = from_bounds(*dst_bounds, transform=src.transform)
+        # Clamp window to dataset extent
+        win = win.intersection(rasterio.windows.Window(0, 0, src.width, src.height))
+        scl = src.read(1, window=win)
     if scl.size == 0:
         return 0.0
     invalid = np.isin(scl, list(SCL_INVALID_CLASSES))
@@ -209,8 +213,8 @@ def pick_scenes(
 
 
 def cached_pick_scenes(bbox_lonlat, t1_target_date=None, force_dates=None):
-    import json
     import hashlib
+
     from pystac import Item
     
     if t1_target_date is None:
@@ -272,12 +276,17 @@ def _find_item_on_date(catalog, bbox_lonlat, aoi_geom, target_date: dt.date):
         datetime=f"{d0.isoformat()}/{d1.isoformat()}",
         max_items=20,
     )
+    best_item, best_vf = None, 0.0
     for it in search.items():
         if not shape(it.geometry).contains(aoi_geom):
             continue
         vf = _scl_valid_fraction(it, bbox_lonlat)
+        if vf > best_vf:
+            best_vf, best_item = vf, it
         if vf >= MIN_VALID_FRACTION:
             return it, vf
+    if best_item is not None and best_vf > 0.0:
+        return best_item, best_vf
     raise RuntimeError(
         f"No valid Sentinel-2 scene found on or near {target_date} for bbox."
     )
@@ -573,8 +582,17 @@ def cluster_timeseries(
         "AWS_NO_SIGN_REQUEST": "YES",
     }
 
-    import calendar, json as _json
-    end_date = dt.date.today()
+    import json as _json
+    t1_val = ndvi_data.get("t1_date")
+    if t1_val:
+        if isinstance(t1_val, str):
+            end_date = dt.date.fromisoformat(t1_val)
+        elif isinstance(t1_val, dt.date):
+            end_date = t1_val
+        else:
+            end_date = dt.date.today()
+    else:
+        end_date = dt.date.today()
     results = []
 
     for m in range(months - 1, -1, -1):
