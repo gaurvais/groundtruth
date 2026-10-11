@@ -755,7 +755,8 @@ if candidates:
     min_lat, max_lat = lat - offset, lat + offset
 
     # 1. FMDA Master Plan 2031 Overlay (Server-side alpha masked)
-    mp_path = fetch_transparent_master_plan(bbox=(min_lon, min_lat, max_lon, max_lat))
+    with st.spinner("Fetching FMDA Master Plan overlay from State GIS server..."):
+        mp_path = fetch_transparent_master_plan(bbox=(min_lon, min_lat, max_lon, max_lat))
     if mp_path and mp_path.exists():
         with open(mp_path, "rb") as image_file:
             mp_b64 = base64.b64encode(image_file.read()).decode("utf-8")
