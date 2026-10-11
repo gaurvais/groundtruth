@@ -88,6 +88,62 @@ T0_GAP_IDEAL_DAYS: int = 10
 DEFAULT_BBOX_LONLAT: tuple[float, float, float, float] = (77.27633, 28.306005, 77.295899, 28.325805)
 USE_STAC: bool = True
 
+# ---------------------------------------------------------------------------
+# Target Regions (Bounding Boxes: lon_min, lat_min, lon_max, lat_max)
+# ---------------------------------------------------------------------------
+REGIONS: dict[str, tuple[float, float, float, float]] = {
+    "Ballabgarh Agro Belt": (77.28, 28.22, 77.42, 28.34),
+    "Aravalli Ridge Corridor": (77.16, 28.28, 77.30, 28.46),
+    "Neharpar Urban Ext.": (77.32, 28.32, 77.44, 28.45),
+    "Entire Faridabad": (77.15, 28.20, 77.55, 28.52),
+}
+
+# Aliases for backwards compatibility
+REGIONS["Neharpar Urban Extension"] = REGIONS["Neharpar Urban Ext."]
+REGIONS["Entire Faridabad District"] = REGIONS["Entire Faridabad"]
+
+# ---------------------------------------------------------------------------
+# Land Use Color Scale (Altair charts & UI legend swatches)
+# ---------------------------------------------------------------------------
+LAND_USE_COLORS: dict[str, str] = {
+    "Agriculture Cropland": "#8BC34A",       # Light green
+    "Forest Plantation": "#2E7D32",          # Dark green
+    "Forest": "#2E7D32",                     # Dark green
+    "Built-up Urban Public Utilities": "#9E9E9E",  # Grey
+    "Built-up Rural Household": "#B0BEC5",   # Light slate grey
+    "Built-up Rural Vegetation": "#81C784",  # Soft green
+    "Built-up": "#9E9E9E",                   # Grey
+    "Wasteland Scrub-Open": "#BCAAA4",       # Muted brown/tan
+    "Wasteland": "#BCAAA4",                  # Muted brown/tan
+    "Waterbody Reservoir/ Tank": "#4FC3F7",  # Light blue
+    "Waterbody Canal": "#29B6F6",            # Cyan blue
+    "Waterbody Lake/Pond": "#0288D1",        # Deep blue
+    "Waterbody": "#4FC3F7",                  # Light blue
+    "Grazing Grassland": "#C5E1A5",          # Pale lime green
+    "Unknown": "#78909C",                    # Neutral grey
+}
+
+DEFAULT_LAND_USE_COLOR: str = "#78909C"
+
+def get_land_use_color(cls_name: str) -> str:
+    """Return hex color for a given land use class, matching exact or keyword."""
+    if cls_name in LAND_USE_COLORS:
+        return LAND_USE_COLORS[cls_name]
+    cls_lower = str(cls_name).lower()
+    if "agri" in cls_lower or "crop" in cls_lower:
+        return "#8BC34A"
+    if "forest" in cls_lower or "tree" in cls_lower or "plantation" in cls_lower:
+        return "#2E7D32"
+    if "built" in cls_lower or "urban" in cls_lower or "settlement" in cls_lower:
+        return "#9E9E9E"
+    if "water" in cls_lower or "pond" in cls_lower or "lake" in cls_lower or "canal" in cls_lower or "reservoir" in cls_lower:
+        return "#4FC3F7"
+    if "waste" in cls_lower or "scrub" in cls_lower:
+        return "#BCAAA4"
+    if "grass" in cls_lower or "grazing" in cls_lower:
+        return "#C5E1A5"
+    return DEFAULT_LAND_USE_COLOR
+
 
 def list_available_inference_profiles(region: str | None = None) -> list[dict]:
     """

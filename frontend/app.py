@@ -23,7 +23,18 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from utils.config import list_available_inference_profiles, FILL_RATIO_ARTIFACT_THRESHOLD, BEDROCK_MODEL_ID, AWS_REGION, LegacyRenegotiationAdapter, T1_VISUAL, USE_STAC
+from utils.config import (
+    list_available_inference_profiles,
+    FILL_RATIO_ARTIFACT_THRESHOLD,
+    BEDROCK_MODEL_ID,
+    AWS_REGION,
+    LegacyRenegotiationAdapter,
+    T1_VISUAL,
+    USE_STAC,
+    REGIONS,
+    LAND_USE_COLORS,
+    get_land_use_color,
+)
 from core.detection import stac_compute_ndvi, extract_clusters, load_and_compute_ndvi
 from core.stac_ingestion import cluster_timeseries
 from integrations.fmda import enrich_clusters_with_land_use
@@ -136,30 +147,70 @@ st.markdown("Faridabad District | Suspected Plot Carving Radar | Sentinel-2 NDVI
 # ---------------------------------------------------------------------------
 st.sidebar.header("Scan Parameters")
 
-REGIONS = {
-    "Aravalli Ridge Corridor": (77.16, 28.28, 77.30, 28.46),
-    "Ballabgarh Agro Belt": (77.28, 28.22, 77.42, 28.34),
-    "Neharpar Urban Extension": (77.32, 28.32, 77.44, 28.45),
-    "Entire Faridabad District": (77.15, 28.20, 77.55, 28.52),
+REGION_OPTIONS = [
+    "Ballabgarh Agro Belt",
+    "Aravalli Ridge Corridor",
+    "Neharpar Urban Ext.",
+    "Entire Faridabad",
+]
+
+region_name = st.sidebar.selectbox(
+    "Select Target Region",
+    options=REGION_OPTIONS,
+    index=None,
+    placeholder="Choose a region...",
+)
+
+TIMEFRAME_DETAILS = {
+    "Live Rapid Surveillance": {
+        "caption": "Recent satellite passes (latest 5–14 days).",
+        "dates": None,
+    },
+    "Historical Ground-Truth Audit": {
+        "caption": "Verified enforcement window (Aug 21 – Sep 15, 2024).",
+        "dates": ("2024-08-21", "2024-09-15"),
+    },
 }
 
-region_name = st.sidebar.selectbox("Select Target Region", list(REGIONS.keys()))
-timeframe_name = st.sidebar.selectbox("Select Timeframe", [
-    "Live Rapid Surveillance (Latest 5-14 Days)",
-    "Historical Ground-Truth Audit (Sept 2024 Enforcement)"
-])
+timeframe_name = st.sidebar.selectbox(
+    "Select Timeframe",
+    options=list(TIMEFRAME_DETAILS.keys()),
+    index=None,
+    placeholder="Choose a timeframe...",
+)
 
-if timeframe_name == "Historical Ground-Truth Audit (Sept 2024 Enforcement)":
-    force_dates = ("2024-08-21", "2024-09-15")
-else:
-    force_dates = None
+if timeframe_name:
+    st.sidebar.caption(TIMEFRAME_DETAILS[timeframe_name]["caption"])
 
-run_scan = st.sidebar.button("Run Satellite Scan")
+can_scan = (region_name is not None) and (timeframe_name is not None)
 
-if run_scan:
+run_scan = st.sidebar.button(
+    "Run Satellite Scan",
+    type="primary",
+    disabled=not can_scan,
+    width="stretch",
+)
+
+if not can_scan:
+    st.sidebar.caption("Select a region and timeframe to begin.")
+
+# Clear results if region or timeframe selection changes
+last_scanned_region = st.session_state.get("last_scanned_region")
+last_scanned_timeframe = st.session_state.get("last_scanned_timeframe")
+
+if (region_name != last_scanned_region) or (timeframe_name != last_scanned_timeframe):
+    st.session_state.scan_run = False
+
+if run_scan and can_scan:
     st.session_state.scan_run = True
+    st.session_state.last_scanned_region = region_name
+    st.session_state.last_scanned_timeframe = timeframe_name
     st.session_state.bbox = REGIONS[region_name]
-    st.session_state.force_dates = force_dates
+    st.session_state.force_dates = TIMEFRAME_DETAILS[timeframe_name]["dates"]
+    # Clear any previous bedrock report from earlier runs
+    st.session_state["bedrock_report"] = None
+    st.session_state["bedrock_error"] = None
+    st.session_state["crop_bytes"] = None
 
 if not st.session_state.get("scan_run", False):
     set_background("Data/background_image.jpg")
@@ -174,6 +225,10 @@ if not st.session_state.get("scan_run", False):
         st.markdown("### Amazon Bedrock (Claude)\nKeeps spatial telemetry securely within the AWS ecosystem, utilizing multimodal LLMs to halt encroachment before permanent thermal islands form.")
         
     st.divider()
+    if not can_scan:
+        st.info("👈 **Select a Target Region and Timeframe in the sidebar to begin.**")
+    else:
+        st.info(f"👈 Ready to scan **{region_name}** ({timeframe_name}). Click **'Run Satellite Scan'** in the sidebar to initialize telemetry.")
     st.markdown("*Built for the WeMakeDevs / AWS Hackathon*")
     st.stop()
 
@@ -274,12 +329,59 @@ for c in clusters:
 if lu_ha:
     import altair as alt
     lu_df = pd.DataFrame({"Land Use": list(lu_ha.keys()), "Area (ha)": list(lu_ha.values())})
-    chart = alt.Chart(lu_df).mark_bar().encode(
-        x=alt.X("Area (ha):Q", title="Area (ha)"),
-        y=alt.Y("Land Use:N", sort="-x", title="", axis=alt.Axis(labelLimit=300)),
-        color=alt.value("#4c78a8"),
-        tooltip=["Land Use", "Area (ha)"]
-    ).properties(height=350).configure_axis(labelFontSize=12, titleFontSize=14)
+
+    domain = list(lu_ha.keys())
+    range_colors = [get_land_use_color(k) for k in domain]
+
+    base = alt.Chart(lu_df)
+
+    max_area = max(lu_ha.values()) if lu_ha else 1.0
+    x_domain = [0, max_area * 1.15]
+
+    bars = base.mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
+        x=alt.X(
+            "Area (ha):Q",
+            title="Area (ha)",
+            scale=alt.Scale(domain=x_domain),
+            axis=alt.Axis(labelColor="#e0e0e0", titleColor="#e0e0e0", gridColor="#2d3748")
+        ),
+        y=alt.Y(
+            "Land Use:N",
+            sort="-x",
+            title="",
+            axis=alt.Axis(labelLimit=300, labelColor="#e0e0e0", titleColor="#e0e0e0")
+        ),
+        color=alt.Color(
+            "Land Use:N",
+            scale=alt.Scale(domain=domain, range=range_colors),
+            legend=None
+        ),
+        tooltip=["Land Use", alt.Tooltip("Area (ha):Q", format=".2f")]
+    )
+
+    text = base.mark_text(
+        align="left",
+        baseline="middle",
+        dx=6,
+        color="#f8fafc",
+        fontSize=12,
+        fontWeight=600
+    ).encode(
+        x=alt.X("Area (ha):Q"),
+        y=alt.Y("Land Use:N", sort="-x"),
+        text=alt.Text("Area (ha):Q", format=".2f")
+    )
+
+    chart = (bars + text).properties(
+        height=max(160, len(lu_df) * 45),
+        background="transparent"
+    ).configure_view(
+        strokeWidth=0
+    ).configure_axis(
+        labelFontSize=12,
+        titleFontSize=14
+    )
+
     st.altair_chart(chart, width='stretch')
     st.caption("Illustrative, FMDA survey (cached) baseline.")
 
@@ -695,7 +797,25 @@ if candidates:
                             unsafe_allow_html=True
                         )
             else:
-                st.caption("FMDA survey (cached) Land Use legend unavailable.")
+                st.caption("State GIS legend offline. Displaying FMDA survey (cached) color palette:")
+                key_swatches = [
+                    ("Agriculture Cropland", LAND_USE_COLORS["Agriculture Cropland"]),
+                    ("Forest Plantation", LAND_USE_COLORS["Forest Plantation"]),
+                    ("Built-up (Urban/Rural)", LAND_USE_COLORS["Built-up"]),
+                    ("Wasteland Scrub", LAND_USE_COLORS["Wasteland"]),
+                    ("Waterbody", LAND_USE_COLORS["Waterbody"]),
+                    ("Grazing Grassland", LAND_USE_COLORS["Grazing Grassland"]),
+                ]
+                cols = st.columns(3)
+                for idx, (label, color) in enumerate(key_swatches):
+                    with cols[idx % 3]:
+                        st.markdown(
+                            f'<div style="display:flex; align-items:center; margin-bottom:8px;">'
+                            f'<span style="display:inline-block; width:16px; height:16px; background-color:{color}; border-radius:3px; margin-right:8px; border:1px solid #555;"></span>'
+                            f'<span style="font-size:12px; color:#e0e0e0;">{label}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
 
         with tab2:
             mp_items = fetch_official_legend("FMDA_MasterPlan2031")
