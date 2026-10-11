@@ -83,8 +83,6 @@ def load_and_compute_ndvi() -> dict:
 
 
 
-
-
 def is_artifact_shaped(cluster_mask: np.ndarray) -> bool:
     """
     Return True if the cluster looks like a sensor swath-edge artifact.

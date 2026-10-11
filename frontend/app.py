@@ -1,7 +1,7 @@
 """
 app.py — GroundTruth Enforcement Dashboard
 ==========================================
-Streamlit front-end only.  All computation is delegated to pipeline.py.
+Streamlit front-end. Computation is delegated to core/, integrations/, and utils/.
 """
 
 import base64
@@ -11,6 +11,7 @@ import sys
 import traceback
 from pathlib import Path
 
+import altair as alt
 import folium
 import pandas as pd
 import streamlit as st
@@ -346,7 +347,6 @@ for c in clusters:
     lu_ha[lu] = round(lu_ha.get(lu, 0.0) + c["pixel_count"] * 0.01, 3)
 
 if lu_ha:
-    import altair as alt
     lu_df = pd.DataFrame({"Land Use": list(lu_ha.keys()), "Area (ha)": list(lu_ha.values())})
 
     domain = list(lu_ha.keys())
@@ -433,7 +433,6 @@ if clusters:
             ts = []
 
     if ts:
-        import altair as alt
         ts_df = pd.DataFrame(ts)
         ts_chart = alt.Chart(ts_df).mark_line(point=True).encode(
             x=alt.X("date:T", title="Acquisition Date", axis=alt.Axis(format="%b %Y", labelColor="#e0e0e0", titleColor="#e0e0e0")),
@@ -467,8 +466,6 @@ st.caption(
 if not clusters:
     st.info("No clusters found above the minimum pixel threshold.")
 else:
-    import pandas as pd
-
     df = pd.DataFrame([
         {
             "Cluster ID": c["id"],
