@@ -1,12 +1,10 @@
 # GroundTruth — DTP Enforcement Radar & UHI Risk Pipeline
 
-**[Live App (TBD)]()** | **[Video Demo (TBD)]()** | **[DevPost Blog (TBD)]()**
-
 ![GroundTruth Header](Data/background_image.jpg)
 
 > *"Concrete is permanent. Vegetation loss is detectable in 10 days. We built the radar that catches it first."*
 
-**GroundTruth** is an automated satellite surveillance dashboard built for the **District Town Planner (DTP) of Faridabad**. It is an always-on early-warning radar that detects suspected unpermitted plot carving on agricultural land — **before a single bag of cement is poured**.
+**GroundTruth** is an automated satellite surveillance dashboard built for the **District Town Planner (DTP) of Faridabad**. It is an on-demand early-warning radar that detects suspected unpermitted plot carving on agricultural land — **before a single bag of cement is poured**.
 
 By identifying ~1 ha vegetation loss events, the pipeline flags the destruction of critical thermal buffers with the goal of enabling government enforcement at the only moment that matters: the clearing stage. It fuses **AWS Open Data**, morphological algorithms, and **Multimodal Generative AI (Amazon Bedrock / Claude)** into an actionable GovTech decision-support tool.
 
@@ -21,7 +19,7 @@ By identifying ~1 ha vegetation loss events, the pipeline flags the destruction 
 - [AWS Cloud-Native Architecture](#-aws-cloud-native-architecture)
 - [Key Features](#-key-features)
 - [Folder Structure](#-folder-structure)
-- [Ground-Truth Benchmark — Cluster 8 Case Study](#-ground-truth-benchmark--cluster-8-case-study)
+- [Ground-Truth Benchmark — Known-Site Case Study](#-ground-truth-benchmark--known-site-case-study)
 - [Results & Benchmarks](#-results--benchmarks)
 - [Limitations & Guardrails](#-limitations--guardrails)
 - [Installation & Setup](#-installation--setup)
@@ -33,7 +31,7 @@ By identifying ~1 ha vegetation loss events, the pipeline flags the destruction 
 
 **Urban Heat Islands (UHIs) are not an accident — they are built, plot by plot.**
 
-Every hectare of agricultural land or Aravalli scrub forest that is scraped bare and paved over permanently removes a cooling buffer. The Faridabad–Gurugram corridor already records **summer temperatures 4–7°C higher** than surrounding rural areas (IMD). The mechanism is straightforward:
+Every hectare of agricultural land or Aravalli scrub forest that is scraped bare and paved over permanently removes a cooling buffer. The mechanism is straightforward:
 
 1. **Vegetation is cleared** — NDVI drops, latent heat flux collapses.
 2. **Bare soil bakes and dries** — albedo shifts, sensible heat rises.
@@ -132,7 +130,7 @@ GroundTruth is built entirely on AWS services, with no proprietary satellite dat
 
 1. **Cloud-Native STAC Ingestion:** Windowed reads of 10m-resolution Sentinel-2 COGs directly from the AWS Open Data Registry (S3) via the Earth Search STAC API — no full-scene downloads, no satellite subscription costs.
 2. **Smart Scene Pair Selection:** Automatically selects the optimal T0/T1 scene pair using SCL cloud masking (valid-pixel fraction ≥ 80%), monsoon-aware fallback, and a configurable baseline separation window (10–30 days).
-3. **Morphological Pruning:** `scipy.ndimage` connected-component labeling + geometric fill-ratio filter (`≥ 0.65`) automatically suppresses sensor swath-edge artifacts without invoking the AI, reducing false-positive Bedrock calls to near zero.
+3. **Morphological Pruning:** `scipy.ndimage` connected-component labeling + geometric fill-ratio filter (`≥ 0.65`) automatically suppresses sensor swath-edge artifacts without invoking the AI, reducing unnecessary Bedrock calls.
 4. **FMDA GIS Cross-Reference:** Validates each anomaly cluster against the Faridabad Master Plan 2031 (live State GIS Server) and cached FMDA Baseline Land Use survey. Reprojects cluster corners batch-vectorized via `rasterio.warp`.
 5. **Amazon Bedrock Multimodal Triage:** Dispatches T0+T1 visual crop pairs to Claude for visual reasoning. Structured `ReviewReport` (Pydantic-validated JSON) enforces compliance phrasing: `"suspected clearing, unverified, licence status not checked"`. Never outputs "illegal" or "unauthorized".
 6. **Dynamic Bounding Box Overlays:** FMDA Master Plan and Land Use map overlays are always computed from the **selected cluster's actual coordinates** (±0.011° offset), not a hardcoded location.
@@ -171,17 +169,15 @@ GroundTruth/
 
 ---
 
-## 📊 Ground-Truth Benchmark — Cluster 8 Case Study
+## 📊 Ground-Truth Benchmark — Known-Site Case Study
 
-This is the project's anchor ground-truth validation. A real, known clearing event was used to calibrate detection thresholds and verify the end-to-end pipeline.
+This is the project's anchor ground-truth validation. A real, known clearing event was used as a sanity check of the end-to-end pipeline. This is the same site discussed at the start of the submitted demo video.
 
-**Location:** Ballabgarh Agro Belt, Faridabad, Haryana  
+**Location:** Faridabad district, Haryana (exact site withheld)  
 **Sentinel-2 Window:** Aug 21, 2024 (T0) → Sep 15, 2024 (T1)  
-**Scene IDs:** `S2A_43RGM_20240821_0_L2A` → `S2B_43RGM_20240915_0_L2A`
 
 | Metric | Value |
 |--------|-------|
-| Cluster ID | **8** |
 | Detected NDVI Drop (Δ) | **−0.321** |
 | Estimated Disturbed Area | **~1.02 est. ha** |
 | Baseline Land Use (FMDA) | **Agriculture Cropland** |
@@ -193,6 +189,12 @@ This is the project's anchor ground-truth validation. A real, known clearing eve
 **Conclusion:** The 1 ha clearing was successfully detected, survived all artifact suppression filters (fill_ratio = 0.31, well below the 0.65 suppression threshold), and received a Claude `FLAG_FOR_REVIEW` verdict in a single API call.
 
 > **Detection floor demonstrated:** ~1 ha at 10m Sentinel-2 resolution.
+
+*Single known site, used as a sanity check, not as statistical validation.*
+
+![Temporal comparison: baseline (T0), recent pass (T1) and flagged mask for the known site](Data/temporal_comparison.png)
+
+*The softness and haze in the T1 panel come from the data itself: 10 m Sentinel-2 imagery captured during the August–September monsoon, not from image processing.*
 
 ---
 
@@ -226,8 +228,8 @@ This is the project's anchor ground-truth validation. A real, known clearing eve
 
 ### Guardrails
 - **Bounded Scans:** 4 preset regional bounding boxes cap memory and STAC query volume.
-- **AI is Triage Only:** `FLAG_FOR_REVIEW` dispatches a human field inspector. The AI makes no legal finding. Compliance language is enforced at the prompt level and validated against the Pydantic schema.
-- **No "illegal":** The word "illegal" or "unauthorized" **cannot appear** in any AI output — enforced via prompt and verified in smoke tests.
+- **AI is Triage Only:** `FLAG_FOR_REVIEW` dispatches a human field inspector. The AI makes no legal finding. Compliance language is enforced at the prompt level.
+- **No "illegal":** The word "illegal" or "unauthorized" **is prohibited** in AI output via the prompt and was checked in smoke tests (a prompt-level control, not a hard guarantee).
 - **Dynamic Cache:** All STAC tiles, land-use GeoJSON, and scene metadata cached on disk by bbox hash. No redundant AWS egress after warm-up.
 
 ---
